@@ -160,6 +160,15 @@ void main() {
     expect(redactString('Authorization: Bearer abcdefghijklmnop1234'), 'Authorization: Bearer [REDACTED]');
   });
 
+  test('locations are never kept', () {
+    final u = redactUrl('https://api.hospify.com/hcp/nearby-hcps?user_lat=6.524379&user_lon=3.379206&radius=5');
+    expect(u, allOf(isNot(contains('6.524379')), isNot(contains('3.379206')), contains('radius=5')));
+    expect(redact({'latitude': 6.5, 'userLng': 3.3, 'pickup_latitude': 1, 'coords': [1, 2], 'plate': 'kept'}),
+        {'latitude': '[REDACTED]', 'userLng': '[REDACTED]', 'pickup_latitude': '[REDACTED]', 'coords': '[REDACTED]', 'plate': 'kept'});
+    expect(redactString('/nearby/6.524379,3.379206'), '/nearby/[REDACTED_LOCATION]');
+    expect(redactString('v1.2,3.4 and 2.0.1'), 'v1.2,3.4 and 2.0.1', reason: 'versions are not coordinates');
+  });
+
   test('a secret key is refused: apps ship the public key', () {
     final c = LoggerAI.init(LoggerAIOptions(publicKey: 'sk_live_oops', endpoint: fake.ingest));
     expect(c.enabled, isFalse);

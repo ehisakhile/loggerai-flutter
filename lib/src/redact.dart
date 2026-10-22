@@ -7,16 +7,22 @@ const mask = '[REDACTED]';
 const _words = {
   'password', 'passwd', 'pwd', 'pass', 'passphrase', 'secret', 'token', 'otp', 'pin', 'cvv', 'cvc', //
   'ssn', 'cookie', 'authorization', 'auth', 'signature', 'sig', 'credential', 'credentials', 'bvn', 'nin',
+  // where someone is: user_lat, userLng, pickup_latitude... (analytics never keep locations)
+  'lat', 'lng', 'lon', 'latitude', 'longitude', 'coords', 'coordinates', 'geolocation', 'gps',
 };
 const _joined = [
   'apikey', 'accesskey', 'privatekey', 'secretkey', 'cardnumber', 'clientsecret', 'sessionid', //
   'authtoken', 'accesstoken', 'refreshtoken', 'idtoken', 'csrftoken', 'xsrf', 'setcookie',
+  'latlng', 'latlon', 'lnglat', 'lonlat', 'geopoint',
 ];
-const _urlExtra = {'key', 'code', 'access_token', 'id_token'};
+const _urlExtra = {'key', 'code', 'access_token', 'id_token', 'll', 'location'}; // ?ll=6.52,3.37 (maps)
 
 final _split = RegExp(r'[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])');
 final _jwt = RegExp(r'eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}');
 final _bearer = RegExp(r'\b(bearer|basic|token)\s+[A-Za-z0-9\-._~+/]{12,}=*', caseSensitive: false);
+
+/// A latitude,longitude pair anywhere, e.g. in a path: /nearby/6.524379,3.379206
+final _coords = RegExp(r'(?<![\d.])-?\d{1,3}\.\d{4,}\s*(?:,|%2C)\s*-?\d{1,3}\.\d{4,}(?![\d.])', caseSensitive: false);
 
 bool isSensitive(String key) {
   if (key.isEmpty) return false;
@@ -27,7 +33,7 @@ bool isSensitive(String key) {
 }
 
 String redactString(String s) =>
-    s.replaceAll(_jwt, '[REDACTED_JWT]').replaceAllMapped(_bearer, (m) => '${m.group(1)} $mask');
+    s.replaceAll(_jwt, '[REDACTED_JWT]').replaceAll(_coords, '[REDACTED_LOCATION]').replaceAllMapped(_bearer, (m) => '${m.group(1)} $mask');
 
 String redactUrl(String url) {
   final u = Uri.tryParse(url);

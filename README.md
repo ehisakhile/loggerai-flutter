@@ -17,8 +17,11 @@ your server's monitoring, with AI that explains what went wrong.
   team gets an issue with all of it and the session's steps, and a message in
   Slack.
 
-Secrets (passwords, tokens, cookies, API keys, JWTs) are masked before
-anything leaves the app, and request and response bodies are never sent.
+Secrets (passwords, tokens, cookies, API keys, JWTs) and locations
+(`lat`, `lng`, `user_lat`, `latitude`... and coordinate pairs in paths) are
+masked before anything leaves the app, and request and response bodies are
+never sent. So network capture is safe to leave on even when your API puts
+the user's position in the URL.
 Android, iOS, macOS, Windows and Linux; on the web everything but network
 capture.
 

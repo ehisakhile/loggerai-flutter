@@ -1,0 +1,8 @@
+# Published with the package: lib/, pubspec.yaml, README.md, analysis_options.yaml.
+# The platform folders stay in git for `flutter run`, out of the download.
+android/
+ios/
+build/
+.dart_tool/
+.metadata
+pubspec.lock

@@ -1,3 +1,11 @@
+## 0.1.2
+
+* The report sheet shows the upload: a progress bar with "Uploading recording… 45%", then "Almost done…" while
+  the server saves it. `LoggerAI.report` takes `onProgress: (sent, total)` for your own UI.
+* A report on a slow connection no longer fails after 60 seconds while it is still uploading: it gives up only
+  when nothing has moved for 30 seconds.
+* An example app (`example/`): screens, a network call, a caught error, a crash and Report a problem.
+
 ## 0.1.1
 
 * Locations are never sent: keys like `lat`, `lng`, `lon`, `latitude`, `longitude`, `user_lat`, `userLng`,

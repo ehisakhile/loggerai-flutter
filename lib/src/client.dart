@@ -10,7 +10,7 @@ import 'frames.dart';
 import 'platform_stub.dart' if (dart.library.io) 'platform_io.dart' as platform;
 import 'redact.dart';
 
-const sdkVersion = '0.1.1';
+const sdkVersion = '0.1.2';
 const defaultEndpoint = 'https://loggerapp.ehigiator.com/api/v1/ingest/batch';
 const _maxEvents = 1000;
 const _maxErrors = 100;
@@ -250,7 +250,10 @@ class Client with WidgetsBindingObserver {
   // ---- reports ------------------------------------------------------------------------------------
 
   /// Sends a problem the user reported, with what they did before it. Returns the issue's id.
-  Future<int> report(String note, {Uint8List? screenshot, Uint8List? recording, String? contact, Map<String, Object?>? extra}) async {
+  ///
+  /// [onProgress] gets the bytes sent so far and the total as the upload goes.
+  Future<int> report(String note,
+      {Uint8List? screenshot, Uint8List? recording, String? contact, Map<String, Object?>? extra, void Function(int sent, int total)? onProgress}) async {
     final url = _reportEndpoint;
     if (!enabled || url == null) throw LoggerAIReportException('Reporting is switched off in this app.');
     event('custom_event', {'name': 'issue_reported', 'note': note, 'screen': screen});
@@ -275,7 +278,7 @@ class Client with WidgetsBindingObserver {
     if (recording != null) req.files.add(http.MultipartFile.fromBytes('recording', recording, filename: 'recording.lrec'));
     final http.Response r;
     try {
-      r = await http.Response.fromStream(await _http.send(req).timeout(const Duration(seconds: 60)));
+      r = await _sendCounted(req, onProgress);
     } catch (e) {
       throw LoggerAIReportException("Couldn't send the report. Check your connection and try again.");
     }
@@ -289,6 +292,60 @@ class Client with WidgetsBindingObserver {
     if (r.statusCode == 429) throw LoggerAIReportException('Too many reports right now. Try again in a little while.');
     if (r.statusCode == 413) throw LoggerAIReportException('The recording is too long to send. Record a shorter one.');
     throw LoggerAIReportException("Couldn't send the report (${r.statusCode}).");
+  }
+
+  /// Sends [req] in small pieces, counting each one as the connection takes it, so a
+  /// recording on a slow network shows real progress. Gives up only when nothing has
+  /// moved for [_stall], not after a fixed time, so a big upload on a slow line still
+  /// gets through.
+  static const _stall = Duration(seconds: 30);
+  static const _piece = 32 * 1024;
+
+  Future<http.Response> _sendCounted(http.MultipartRequest req, void Function(int sent, int total)? onProgress) async {
+    final body = req.finalize(); // sets the multipart content-type header
+    final total = req.contentLength;
+    final out = http.StreamedRequest(req.method, req.url)
+      ..headers.addAll(req.headers)
+      ..contentLength = total;
+
+    final stalled = Completer<Never>();
+    Timer? watchdog;
+    var finished = false; // the last piece can resume after the answer: no new watchdog then
+    void kick() {
+      if (finished) return;
+      watchdog?.cancel();
+      watchdog = Timer(_stall, () {
+        if (!stalled.isCompleted) stalled.completeError(TimeoutException('upload stalled'));
+      });
+    }
+
+    var sent = 0;
+    onProgress?.call(0, total);
+    kick();
+    Stream<List<int>> pieces() async* {
+      await for (final chunk in body) {
+        for (var i = 0; i < chunk.length; i += _piece) {
+          final part = chunk.sublist(i, min(i + _piece, chunk.length));
+          yield part; // resumes only when the connection wants more
+          sent += part.length;
+          kick();
+          onProgress?.call(sent, total);
+        }
+      }
+    }
+
+    unawaited(out.sink.addStream(pieces()).then((_) => out.sink.close(), onError: (Object e) => out.sink.close()));
+    try {
+      final streamed = await Future.any([_http.send(out), stalled.future]);
+      finished = true;
+      watchdog?.cancel();
+      onProgress?.call(total, total);
+      // The server is saving it: allow a moment, not the stall window again.
+      return await http.Response.fromStream(streamed).timeout(const Duration(seconds: 60));
+    } finally {
+      finished = true;
+      watchdog?.cancel();
+    }
   }
 
   void close() {

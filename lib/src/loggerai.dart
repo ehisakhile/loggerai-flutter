@@ -89,10 +89,12 @@ class LoggerAI {
   /// Sends a report from your own UI: a note, and optionally a screenshot and a
   /// recording (see [ScreenRecorder]). Returns the issue's id; throws
   /// [LoggerAIReportException] with a message for the user when it can't be sent.
-  static Future<int> report(String note, {Uint8List? screenshot, Uint8List? recording, String? contact}) {
+  /// [onProgress] gets the bytes sent and the total, to show the upload.
+  static Future<int> report(String note,
+      {Uint8List? screenshot, Uint8List? recording, String? contact, void Function(int sent, int total)? onProgress}) {
     final c = _client;
     if (c == null) return Future.error(LoggerAIReportException("LoggerAI isn't started."));
-    return c.report(note, screenshot: screenshot, recording: recording, contact: contact);
+    return c.report(note, screenshot: screenshot, recording: recording, contact: contact, onProgress: onProgress);
   }
 
   /// A screenshot of the app as PNG, with text fields and [LoggerAIMask] areas painted over.
@@ -250,6 +252,8 @@ class _ReportSheetState extends State<ReportSheet> {
   bool _sending = false;
   bool _sent = false;
   String? _error;
+  // Upload progress, 0..1; null while getting ready (before any bytes go out).
+  double? _progress;
 
   Future<void> _send() async {
     final note = _draft.note.text.trim();
@@ -259,17 +263,30 @@ class _ReportSheetState extends State<ReportSheet> {
     }
     setState(() {
       _sending = true;
+      _progress = null;
       _error = null;
     });
     try {
       await LoggerAI.report(note,
-          screenshot: _draft.keepScreenshot ? _draft.screenshot : null, recording: _draft.recording, contact: widget.askContact ? _draft.contact.text : null);
+          screenshot: _draft.keepScreenshot ? _draft.screenshot : null,
+          recording: _draft.recording,
+          contact: widget.askContact ? _draft.contact.text : null, onProgress: (sent, total) {
+        if (mounted && total > 0) setState(() => _progress = sent / total);
+      });
       if (mounted) setState(() => _sent = true);
     } on LoggerAIReportException catch (e) {
       if (mounted) setState(() => _error = e.message);
     } finally {
       if (mounted) setState(() => _sending = false);
     }
+  }
+
+  String _sendingLabel() {
+    final p = _progress;
+    if (p == null) return 'Getting ready…';
+    if (p >= 1) return 'Almost done…';
+    final what = _draft.recording != null ? 'recording' : 'report';
+    return 'Uploading $what… ${(p * 100).floor()}%';
   }
 
   Widget _chip({required Widget leading, required String label, required VoidCallback onRemove, required Key removeKey}) {
@@ -357,10 +374,19 @@ class _ReportSheetState extends State<ReportSheet> {
                     child: Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
                   ),
                 const SizedBox(height: 16),
+                if (_sending) ...[
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(key: const Key('loggerai-report-progress'), value: _progress, minHeight: 6),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(_sendingLabel(), key: const Key('loggerai-report-progress-label'), style: theme.textTheme.bodyMedium, textAlign: TextAlign.center),
+                  const SizedBox(height: 12),
+                ],
                 FilledButton(
                   key: const Key('loggerai-report-send'),
                   onPressed: _sending ? null : _send,
-                  child: _sending ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Send'),
+                  child: Text(_sending ? 'Sending…' : 'Send'),
                 ),
               ]),
             ),

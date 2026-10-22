@@ -1,0 +1,18 @@
+name: loggerai_flutter_example
+description: "A small app showing LoggerAI for Flutter: crashes, screens, network calls and Report a problem."
+publish_to: none
+version: 1.0.0
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ">=1.1.0 <2.0.0"
+  loggerai_flutter:
+    path: ..
+
+dev_dependencies:
+  flutter_lints: ^6.0.0

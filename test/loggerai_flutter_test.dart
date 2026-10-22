@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -7,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:loggerai_flutter/loggerai_flutter.dart';
 import 'package:loggerai_flutter/src/capture.dart';
+import 'package:loggerai_flutter/src/client.dart' show sdkVersion;
 import 'package:loggerai_flutter/src/frames.dart';
 
 /// A stand-in for LoggerAI's ingest (and an API the app calls), on a real socket.
@@ -16,6 +18,9 @@ class Fake {
   final keys = <String?>[];
   final apiHeaders = <HttpHeaders>[];
   final reports = <List<int>>[];
+  // When set, a report's answer waits on it (to see the sheet mid-send).
+  Future<void>? holdReports;
+  int reportsWaiting = 0;
 
   Future<void> start() async {
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
@@ -28,6 +33,11 @@ class Fake {
       }
       final body = utf8.decode(raw, allowMalformed: true);
       if (req.uri.path == '/ingest/report') {
+        final hold = holdReports;
+        if (hold != null) {
+          reportsWaiting++;
+          await hold;
+        }
         reports.add(raw);
         keys.add(req.headers.value('x-loggerai-key'));
         req.response.statusCode = 201;
@@ -85,7 +95,7 @@ void main() {
     await LoggerAI.flush();
     final b = fake.batches.last;
     expect(fake.keys.last, 'pk_live_test');
-    expect(b['sdk'], {'name': 'loggerai-flutter', 'version': '0.1.1'});
+    expect(b['sdk'], {'name': 'loggerai-flutter', 'version': sdkVersion});
     expect(b['service'], 'mobile');
     expect(b['release'], '1.4.2');
     final session = (b['sessions'] as List).single as Map;
@@ -203,6 +213,69 @@ void main() {
     expect(ev['name'], 'issue_reported');
     final net = fake.all('events').where((e) => e['type'] == 'network_request').map((e) => (e['payload'] as Map)['url'] as String);
     expect(net.any((u) => u.contains('/ingest/')), isFalse, reason: 'calls to LoggerAI are never recorded');
+  });
+
+  test('report(): upload progress goes up in pieces to the whole body, and the recording arrives intact', () async {
+    LoggerAI.init(opts());
+    final big = Uint8List.fromList(List.generate(300 * 1024, (i) => i % 251));
+    final seen = <(int, int)>[];
+    await LoggerAI.report('Slow upload', recording: big, onProgress: (sent, total) => seen.add((sent, total)));
+    final total = seen.first.$2;
+    expect(total, greaterThan(big.length));
+    expect(seen.first.$1, 0);
+    expect(seen.last.$1, total);
+    expect(seen.where((p) => p.$1 > 0 && p.$1 < total).length, greaterThanOrEqualTo(8), reason: 'sent in 32 KB pieces, not one jump');
+    for (var i = 1; i < seen.length; i++) {
+      expect(seen[i].$1, greaterThanOrEqualTo(seen[i - 1].$1));
+    }
+    final raw = fake.reports.last;
+    expect(raw.length, total);
+    final text = latin1.decode(raw);
+    final start = text.indexOf('\r\n\r\n', text.indexOf('filename="recording.lrec"')) + 4;
+    expect(raw.sublist(start, start + big.length), big);
+  });
+
+  testWidgets('the report sheet shows the upload while it sends', (tester) async {
+    await tester.runAsync(() async => LoggerAI.init(opts()));
+    final gate = Completer<void>();
+    fake.holdReports = gate.future;
+    fake.reportsWaiting = 0;
+    addTearDown(() => fake.holdReports = null);
+    await tester.pumpWidget(MaterialApp(
+        home: Builder(
+            builder: (c) => Scaffold(
+                body: Center(
+                    child: ElevatedButton(
+                        onPressed: () => LoggerAI.showReportSheet(c, includeScreenshot: false, allowRecording: false), child: const Text('report')))))));
+    Future<void> real(int ms) => tester.runAsync(() => Future<void>.delayed(Duration(milliseconds: ms)));
+
+    await tester.tap(find.text('report'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('loggerai-report-text')), 'It hangs');
+    await tester.tap(find.byKey(const Key('loggerai-report-send')));
+    await tester.pump();
+    expect(find.byKey(const Key('loggerai-report-progress')), findsOneWidget);
+    expect(find.text('Sending…'), findsOneWidget);
+
+    // the body is all sent; the server hasn't answered yet
+    for (var i = 0; i < 40 && fake.reportsWaiting == 0; i++) {
+      await real(50);
+      await tester.pump();
+    }
+    await real(50);
+    await tester.pump();
+    expect(find.text('Almost done…'), findsOneWidget);
+    final bar = tester.widget<LinearProgressIndicator>(find.byKey(const Key('loggerai-report-progress')));
+    expect(bar.value, 1.0);
+
+    gate.complete();
+    for (var i = 0; i < 40 && find.textContaining('Thanks').evaluate().isEmpty; i++) {
+      await real(50);
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(find.textContaining('Thanks'), findsOneWidget);
+    expect(find.byKey(const Key('loggerai-report-progress')), findsNothing);
+    await tester.pump(const Duration(seconds: 16)); // dart:io's keep-alive timer for the connection
   });
 
   test('the recording format', () {

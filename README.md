@@ -93,10 +93,10 @@ TextButton(
 The sheet takes a screenshot of the screen the user was on before it opens.
 **Record the problem** hides the sheet and records the screen (a few frames a
 second, up to a minute) while a small pill shows the time and **Stop**; then
-the sheet comes back with the recording, and **Send** creates the issue. Your
-team sees it on the Issues page with the recording, the screenshot, what the
-user did before it and any errors just before, and your Slack alert channels
-get a message.
+the sheet comes back with the recording, and **Send** creates the issue, with a
+progress bar while it uploads. Your team sees it on the Issues page with the
+recording, the screenshot, what the user did before it and any errors just
+before, and your Slack alert channels get a message.
 
 Text fields are painted over in screenshots and recordings, and so is anything
 you wrap in `LoggerAIMask`:
@@ -117,7 +117,8 @@ final recorder = ScreenRecorder()..start();
 // ...later
 final recording = await recorder.stop();
 try {
-  await LoggerAI.report(note, screenshot: shot, recording: recording);
+  await LoggerAI.report(note, screenshot: shot, recording: recording,
+      onProgress: (sent, total) => setState(() => progress = sent / total));
 } on LoggerAIReportException catch (e) {
   showError(e.message); // in words for the user
 }

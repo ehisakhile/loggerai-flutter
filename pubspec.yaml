@@ -1,0 +1,21 @@
+name: loggerai_flutter
+description: "LoggerAI for Flutter: crashes and errors grouped with their stack, screens, network calls and a report sheet, linked to your server's requests."
+version: 0.1.0
+homepage: https://loggerai.uk
+repository: https://github.com/ehisakhile/loggerai-flutter
+issue_tracker: https://github.com/ehisakhile/loggerai-flutter/issues
+topics: [monitoring, crash-reporting, observability, logging, apm]
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ">=1.1.0 <2.0.0"
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0

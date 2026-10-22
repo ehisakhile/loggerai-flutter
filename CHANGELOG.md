@@ -1,3 +1,9 @@
+## 0.1.1
+
+* Locations are never sent: keys like `lat`, `lng`, `lon`, `latitude`, `longitude`, `user_lat`, `userLng`,
+  `coords`, `ll` and `location` in URLs, fields and events are masked, and so are latitude,longitude pairs in
+  paths. Network capture is safe to leave on when your API puts the user's position in the URL.
+
 ## 0.1.0
 
 * First release: crashes and errors grouped with their stack (Flutter, async and platform errors), screens through a

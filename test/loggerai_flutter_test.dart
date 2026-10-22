@@ -85,7 +85,7 @@ void main() {
     await LoggerAI.flush();
     final b = fake.batches.last;
     expect(fake.keys.last, 'pk_live_test');
-    expect(b['sdk'], {'name': 'loggerai-flutter', 'version': '0.1.0'});
+    expect(b['sdk'], {'name': 'loggerai-flutter', 'version': '0.1.1'});
     expect(b['service'], 'mobile');
     expect(b['release'], '1.4.2');
     final session = (b['sessions'] as List).single as Map;

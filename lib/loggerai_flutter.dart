@@ -3,6 +3,7 @@
 /// all in a session linked to your server's requests.
 library;
 
-export 'src/client.dart' show LoggerAIOptions, Client;
+export 'src/capture.dart' show LoggerAIMask, ScreenRecorder;
+export 'src/client.dart' show LoggerAIOptions, Client, LoggerAIReportException;
 export 'src/loggerai.dart';
 export 'src/redact.dart' show redact, redactString, redactUrl, isSensitive;

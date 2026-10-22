@@ -1,10 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:loggerai_flutter/loggerai_flutter.dart';
+import 'package:loggerai_flutter/src/capture.dart';
 import 'package:loggerai_flutter/src/frames.dart';
 
 /// A stand-in for LoggerAI's ingest (and an API the app calls), on a real socket.
@@ -13,12 +15,24 @@ class Fake {
   final batches = <Map<String, dynamic>>[];
   final keys = <String?>[];
   final apiHeaders = <HttpHeaders>[];
+  final reports = <List<int>>[];
 
   Future<void> start() async {
     server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     server.listen((req) async {
-      final body = await utf8.decoder.bind(req).join();
-      if (req.uri.path == '/ingest') {
+      final List<int> raw;
+      try {
+        raw = await req.fold<List<int>>(<int>[], (a, b) => a..addAll(b));
+      } on HttpException {
+        return; // the server closed at the end of the tests
+      }
+      final body = utf8.decode(raw, allowMalformed: true);
+      if (req.uri.path == '/ingest/report') {
+        reports.add(raw);
+        keys.add(req.headers.value('x-loggerai-key'));
+        req.response.statusCode = 201;
+        req.response.write('{"id": ${reports.length}}');
+      } else if (req.uri.path == '/ingest/batch') {
         batches.add(jsonDecode(body) as Map<String, dynamic>);
         keys.add(req.headers.value('x-loggerai-key'));
         req.response.statusCode = 202;
@@ -31,7 +45,7 @@ class Fake {
     });
   }
 
-  String get ingest => 'http://127.0.0.1:${server.port}/ingest';
+  String get ingest => 'http://127.0.0.1:${server.port}/ingest/batch';
   String api(String path) => 'http://127.0.0.1:${server.port}$path';
   List<dynamic> all(String kind) => batches.expand((b) => (b[kind] as List?) ?? const []).toList();
 }
@@ -151,32 +165,138 @@ void main() {
     expect(c.enabled, isFalse);
   });
 
-  testWidgets('the navigator observer names screens; the report sheet sends a note', (tester) async {
+  Map field(String body) {
+    final m = RegExp(r'name="report"\r\n(?:[^\r\n]+\r\n)*\r\n(.*?)\r\n--', dotAll: true).firstMatch(body);
+    if (m == null) throw StateError('no report field in: ${body.substring(0, body.length.clamp(0, 400))}');
+    return jsonDecode(m.group(1)!) as Map;
+  }
+
+  test('report(): the note, the session, a screenshot and a recording in one request', () async {
+    LoggerAI.init(opts());
+    LoggerAI.setScreen('/checkout');
+    final rec = encodeRecording([(0, Uint8List.fromList([1, 2, 3])), (500, Uint8List.fromList([4, 5]))], 10, 20);
+    final id = await LoggerAI.report('Pay does nothing, password hunter2 token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U',
+        screenshot: Uint8List.fromList([0x89, 0x50, 0x4e, 0x47]), recording: rec, contact: 'ada@example.com');
+    expect(id, fake.reports.length);
+    final body = latin1.decode(fake.reports.last);
+    final report = field(body);
+    expect(report['session_id'], LoggerAI.sessionId);
+    expect(report['screen'], '/checkout');
+    expect(report['platform'], 'flutter');
+    expect(report['contact'], 'ada@example.com');
+    expect(report['note'], contains('[REDACTED_JWT]'));
+    expect(body, contains('name="screenshot"'));
+    expect(body, contains('name="recording"'));
+    expect(body, contains('LREC'));
+    expect(fake.keys.last, 'pk_live_test');
+    // the session went first, so the issue can link to it; the report is in its timeline
+    final ev = fake.all('events').lastWhere((e) => e['type'] == 'custom_event')['payload'] as Map;
+    expect(ev['name'], 'issue_reported');
+    final net = fake.all('events').where((e) => e['type'] == 'network_request').map((e) => (e['payload'] as Map)['url'] as String);
+    expect(net.any((u) => u.contains('/ingest/')), isFalse, reason: 'calls to LoggerAI are never recorded');
+  });
+
+  test('the recording format', () {
+    final f = encodeRecording([(0, Uint8List.fromList([9, 9, 9])), (480, Uint8List.fromList([7]))], 360, 780);
+    expect(ascii.decode(f.sublist(0, 4)), 'LREC');
+    final n = ByteData.sublistView(f, 4, 8).getUint32(0);
+    final head = jsonDecode(utf8.decode(f.sublist(8, 8 + n))) as Map;
+    expect(head['width'], 360);
+    expect(head['frames'], [
+      {'t': 0, 'o': 0, 'n': 3},
+      {'t': 480, 'o': 3, 'n': 1},
+    ]);
+    expect(f.sublist(8 + n), [9, 9, 9, 7]);
+  });
+
+  testWidgets('screenshots paint over text fields and LoggerAIMask', (tester) async {
+    await tester.pumpWidget(const MaterialApp(
+      home: Scaffold(
+        backgroundColor: Color(0xFFFF0000),
+        body: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SizedBox(height: 100),
+          SizedBox(width: 300, child: TextField(controller: null, decoration: InputDecoration(border: InputBorder.none))),
+          SizedBox(height: 50),
+          LoggerAIMask(child: SizedBox(width: 200, height: 40, child: ColoredBox(color: Color(0xFF00FF00)))),
+        ]),
+      ),
+    ));
+    await tester.enterText(find.byType(TextField), 'my secret password');
+    await tester.pump();
+    await tester.runAsync(() async {
+      final img = (await captureScreen(maxWidth: 800))!;
+      final px = (await img.toByteData())!;
+      int at(Offset o) => px.getUint32((o.dy.round() * img.width + o.dx.round()) * 4);
+      final field = tester.getRect(find.byType(EditableText)).center;
+      final masked = tester.getRect(find.byType(LoggerAIMask)).center;
+      expect(at(field), 0x9AA3ADFF, reason: 'the text field is covered');
+      expect(at(masked), 0x9AA3ADFF, reason: 'LoggerAIMask is covered');
+      expect(at(const Offset(5, 5)), 0xFF0000FF, reason: 'the rest of the screen is kept');
+      expect(img.width, 800);
+    });
+  });
+
+  testWidgets('the report sheet: a screenshot, a recording made by the user, and the note', (tester) async {
     await tester.runAsync(() async => LoggerAI.init(opts()));
     await tester.pumpWidget(MaterialApp(
       navigatorObservers: [LoggerAI.navigatorObserver],
       routes: {
         '/': (c) => Scaffold(body: Center(child: ElevatedButton(onPressed: () => Navigator.of(c).pushNamed('/settings'), child: const Text('go')))),
-        '/settings': (c) => Scaffold(body: Center(child: ElevatedButton(onPressed: () => LoggerAI.showReportSheet(c), child: const Text('report')))),
+        '/settings': (c) => Scaffold(
+            backgroundColor: Colors.amber,
+            body: Center(child: ElevatedButton(onPressed: () => LoggerAI.showReportSheet(c, askContact: true), child: const Text('report')))),
       },
     ));
     await tester.tap(find.text('go'));
     await tester.pumpAndSettle();
     expect(LoggerAI.client!.screen, '/settings');
+
+    Future<void> real(int ms) => tester.runAsync(() => Future<void>.delayed(Duration(milliseconds: ms)));
+    Future<void> settle() async {
+      for (var i = 0; i < 20; i++) {
+        await real(30);
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+    }
+
     await tester.tap(find.text('report'));
-    await tester.pumpAndSettle();
+    await settle(); // the screenshot is taken before the sheet opens
+    expect(find.text('Screenshot'), findsOneWidget);
     await tester.enterText(find.byKey(const Key('loggerai-report-text')), 'The pay button does nothing');
-    await tester.runAsync(() async {
-      await tester.tap(find.byKey(const Key('loggerai-report-send')));
-      await Future<void>.delayed(const Duration(milliseconds: 300));
-    });
-    await tester.pumpAndSettle();
+    await tester.enterText(find.byKey(const Key('loggerai-report-contact')), 'ada@example.com');
+
+    await tester.tap(find.byKey(const Key('loggerai-report-record')));
+    await settle();
+    expect(find.byKey(const Key('loggerai-record-stop')), findsOneWidget, reason: 'the sheet hides and the Stop pill shows');
+    expect(find.byKey(const Key('loggerai-report-text')), findsNothing);
+    await settle(); // a couple of seconds of frames
+    await tester.tap(find.byKey(const Key('loggerai-record-stop')));
+    await settle();
+    expect(find.byKey(const Key('loggerai-record-stop')), findsNothing);
+    expect(find.textContaining('Recording 0:0'), findsOneWidget, reason: 'the sheet is back with the recording');
+    expect(find.text('The pay button does nothing'), findsOneWidget, reason: 'what they typed is kept');
+
+    await tester.tap(find.byKey(const Key('loggerai-report-send')));
+    for (var i = 0; i < 20 && find.textContaining('Thanks').evaluate().isEmpty; i++) {
+      await real(100);
+      await tester.pump(const Duration(milliseconds: 50));
+    }
     expect(find.textContaining('Thanks'), findsOneWidget);
-    final report = fake.all('events').lastWhere((e) => e['type'] == 'custom_event')['payload'] as Map;
-    expect(report['name'], 'issue_reported');
+    final body = latin1.decode(fake.reports.last);
+    final report = field(body);
     expect(report['note'], 'The pay button does nothing');
     expect(report['screen'], '/settings');
+    expect(report['contact'], 'ada@example.com');
+    final rec = fake.reports.last;
+    final at = latin1.decode(rec).indexOf('LREC');
+    expect(at, greaterThan(0));
+    final n = ByteData.sublistView(Uint8List.fromList(rec), at + 4, at + 8).getUint32(0);
+    final head = jsonDecode(utf8.decode(rec.sublist(at + 8, at + 8 + n))) as Map;
+    expect((head['frames'] as List).length, greaterThanOrEqualTo(2));
+    expect(body, contains('name="screenshot"'));
+    expect(body, contains('\x89PNG'));
     final views = fake.all('events').where((e) => e['type'] == 'page_view').map((e) => (e['payload'] as Map)['url']).toList();
     expect(views, containsAll(['/', '/settings']));
+    LoggerAI.client!.close(); // its idle connections, before the test's fake clock checks for timers
   });
 }

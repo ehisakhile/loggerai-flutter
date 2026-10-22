@@ -12,8 +12,10 @@ your server's monitoring, with AI that explains what went wrong.
 - **Linked to your server**: calls to your own API carry `traceparent` and
   `x-loggerai-session`, so LoggerAI shows the exact server request behind a
   failed tap (with LoggerAI's Laravel, Python, Node.js or Java SDK on the server).
-- **A report sheet**: people describe a problem in the app, and the team gets
-  it with the whole session attached.
+- **Report a problem**: people describe what went wrong, keep a screenshot of
+  the screen they were on and can record the screen while they show it. The
+  team gets an issue with all of it and the session's steps, and a message in
+  Slack.
 
 Secrets (passwords, tokens, cookies, API keys, JWTs) are masked before
 anything leaves the app, and request and response bodies are never sent.
@@ -74,8 +76,48 @@ LoggerAI.setUser(user.id);
 // Something worth seeing in the timeline
 LoggerAI.event('coupon_applied', {'coupon': 'SAVE10'});
 
-// A "Report a problem" button
-TextButton(onPressed: () => LoggerAI.showReportSheet(context), child: const Text('Report a problem'));
+```
+
+## Report a problem
+
+```dart
+TextButton(
+  onPressed: () => LoggerAI.showReportSheet(context, askContact: true),
+  child: const Text('Report a problem'),
+);
+```
+
+The sheet takes a screenshot of the screen the user was on before it opens.
+**Record the problem** hides the sheet and records the screen (a few frames a
+second, up to a minute) while a small pill shows the time and **Stop**; then
+the sheet comes back with the recording, and **Send** creates the issue. Your
+team sees it on the Issues page with the recording, the screenshot, what the
+user did before it and any errors just before, and your Slack alert channels
+get a message.
+
+Text fields are painted over in screenshots and recordings, and so is anything
+you wrap in `LoggerAIMask`:
+
+```dart
+LoggerAIMask(child: Text(account.iban))
+```
+
+No plugin or permission is needed: Flutter draws the screen, so the SDK takes
+its picture of what Flutter drew (system dialogs, the keyboard and platform
+views such as maps or web views aren't in it).
+
+Your own UI instead of the sheet:
+
+```dart
+final shot = await LoggerAI.screenshot();
+final recorder = ScreenRecorder()..start();
+// ...later
+final recording = await recorder.stop();
+try {
+  await LoggerAI.report(note, screenshot: shot, recording: recording);
+} on LoggerAIReportException catch (e) {
+  showError(e.message); // in words for the user
+}
 ```
 
 If you set up error handling yourself, call `LoggerAI.init(options)` after
@@ -97,6 +139,7 @@ replacing what's there.
 | `flushInterval` | 10 seconds (and whenever the app goes to the background or crashes) |
 | `sessionTimeout` | 30 minutes in the background starts a new session |
 | `enabled` | `true` (pass `kReleaseMode` to send from release builds only) |
+| `maskTextFields` | `true`: every text field is painted over in screenshots and recordings |
 
 ## How it behaves
 
@@ -104,6 +147,8 @@ replacing what's there.
   right after a crash. Nothing blocks the UI or throws into the app.
 - When LoggerAI can't be reached, data waits in memory (up to 1,000 events) for
   the next try; nothing is written to the device.
+- Nothing about the screen is captured until the user opens the report sheet,
+  and recording only runs between their Record and Stop.
 
 ## Development
 

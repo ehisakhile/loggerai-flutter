@@ -29,6 +29,8 @@ class LoggerAIOptions {
     this.flushInterval = const Duration(seconds: 10),
     this.sessionTimeout = const Duration(minutes: 30),
     this.enabled = true,
+    this.reportEndpoint,
+    this.maskTextFields = true,
   });
 
   /// The project's public key (pk_live_...). Safe to ship in the app.
@@ -57,6 +59,22 @@ class LoggerAIOptions {
   /// After this long in the background, coming back starts a new session.
   final Duration sessionTimeout;
   final bool enabled;
+
+  /// Where reports go; by default the ingest endpoint with /report instead of /batch.
+  final String? reportEndpoint;
+
+  /// Paint over every text field in screenshots and recordings (as well as LoggerAIMask).
+  final bool maskTextFields;
+}
+
+/// A report couldn't be sent: [message] says why, in words for the user.
+class LoggerAIReportException implements Exception {
+  LoggerAIReportException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
 }
 
 final _random = Random.secure();
@@ -81,16 +99,17 @@ class Client with WidgetsBindingObserver {
       debugPrint('LoggerAI: apps use the public key (pk_live_...), never the secret one. Not sending.');
     }
     _endpoint = Uri.tryParse(options.endpoint);
+    _reportEndpoint = Uri.tryParse(options.reportEndpoint ?? options.endpoint.replaceFirst(RegExp(r'/batch/?$'), '/report'));
     _newSession();
   }
 
   final LoggerAIOptions options;
   bool enabled;
   Uri? _endpoint;
+  Uri? _reportEndpoint;
 
   /// A call to LoggerAI itself, which is never recorded.
-  bool isEndpoint(Uri url) =>
-      _endpoint != null && url.host == _endpoint!.host && url.port == _endpoint!.port && url.path == _endpoint!.path;
+  bool isEndpoint(Uri url) => [_endpoint, _reportEndpoint].any((e) => e != null && url.host == e.host && url.port == e.port && url.path == e.path);
   final http.Client _http = http.Client();
   final List<Map<String, Object?>> _events = [];
   final List<Map<String, Object?>> _errors = [];
@@ -226,6 +245,50 @@ class Client with WidgetsBindingObserver {
     } catch (e) {
       lastError = "couldn't reach LoggerAI: $e"; // kept for the next try, within the buffer's limits
     }
+  }
+
+  // ---- reports ------------------------------------------------------------------------------------
+
+  /// Sends a problem the user reported, with what they did before it. Returns the issue's id.
+  Future<int> report(String note, {Uint8List? screenshot, Uint8List? recording, String? contact, Map<String, Object?>? extra}) async {
+    final url = _reportEndpoint;
+    if (!enabled || url == null) throw LoggerAIReportException('Reporting is switched off in this app.');
+    event('custom_event', {'name': 'issue_reported', 'note': note, 'screen': screen});
+    await flush(); // the session and its steps first, so the issue links to them
+    final s = _session();
+    final req = http.MultipartRequest('POST', url)
+      ..headers['X-LoggerAI-Key'] = options.publicKey
+      ..fields['report'] = jsonEncode({
+        'session_id': sessionId,
+        'note': redactString(note),
+        'screen': screen,
+        'user': user,
+        if (contact != null && contact.trim().isNotEmpty) 'contact': contact.trim(),
+        'platform': kIsWeb ? 'browser' : 'flutter',
+        'device': '${s['device']} · ${s['os']}',
+        'release': options.release,
+        'environment': options.environment,
+        'service': options.service,
+        if (extra != null) 'extra': redact(extra),
+      });
+    if (screenshot != null) req.files.add(http.MultipartFile.fromBytes('screenshot', screenshot, filename: 'screenshot.png'));
+    if (recording != null) req.files.add(http.MultipartFile.fromBytes('recording', recording, filename: 'recording.lrec'));
+    final http.Response r;
+    try {
+      r = await http.Response.fromStream(await _http.send(req).timeout(const Duration(seconds: 60)));
+    } catch (e) {
+      throw LoggerAIReportException("Couldn't send the report. Check your connection and try again.");
+    }
+    if (r.statusCode == 201) {
+      try {
+        return (jsonDecode(r.body) as Map)['id'] as int;
+      } catch (_) {
+        return 0;
+      }
+    }
+    if (r.statusCode == 429) throw LoggerAIReportException('Too many reports right now. Try again in a little while.');
+    if (r.statusCode == 413) throw LoggerAIReportException('The recording is too long to send. Record a shorter one.');
+    throw LoggerAIReportException("Couldn't send the report (${r.statusCode}).");
   }
 
   void close() {

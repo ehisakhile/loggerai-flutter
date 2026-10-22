@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'capture.dart';
 import 'client.dart';
 
 /// LoggerAI for Flutter.
@@ -85,14 +86,124 @@ class LoggerAI {
   /// Records each screen as the user moves through the app.
   static final NavigatorObserver navigatorObserver = LoggerAINavigatorObserver();
 
-  /// A sheet where the user describes a problem. It lands in the session's timeline
-  /// in LoggerAI, with everything that happened before it.
-  static Future<void> showReportSheet(BuildContext context, {String title = 'Report a problem', String hint = 'What went wrong?'}) {
-    return showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (_) => ReportSheet(title: title, hint: hint),
+  /// Sends a report from your own UI: a note, and optionally a screenshot and a
+  /// recording (see [ScreenRecorder]). Returns the issue's id; throws
+  /// [LoggerAIReportException] with a message for the user when it can't be sent.
+  static Future<int> report(String note, {Uint8List? screenshot, Uint8List? recording, String? contact}) {
+    final c = _client;
+    if (c == null) return Future.error(LoggerAIReportException("LoggerAI isn't started."));
+    return c.report(note, screenshot: screenshot, recording: recording, contact: contact);
+  }
+
+  /// A screenshot of the app as PNG, with text fields and [LoggerAIMask] areas painted over.
+  static Future<Uint8List?> screenshot() => screenshotPng(maskTextFields: _client?.options.maskTextFields ?? true);
+
+  /// "Report a problem": the user describes it, can keep a screenshot of the screen
+  /// they were on and record the screen while they show what goes wrong. The team
+  /// gets an issue with all of it and the session's steps, and a Slack message.
+  ///
+  /// Call it from a button, a menu or a shake handler.
+  static Future<void> showReportSheet(
+    BuildContext context, {
+    String title = 'Report a problem',
+    String hint = 'What went wrong?',
+    bool askContact = false,
+    bool allowRecording = true,
+    bool includeScreenshot = true,
+    Duration maxRecording = const Duration(seconds: 60),
+  }) async {
+    final nav = Navigator.of(context, rootNavigator: true);
+    final mask = _client?.options.maskTextFields ?? true;
+    // The picture is of the screen they were on, before the sheet covers it.
+    final draft = ReportDraft(screenshot: includeScreenshot ? await screenshotPng(maskTextFields: mask) : null);
+    while (nav.mounted) {
+      final next = await showModalBottomSheet<String>(
+        context: nav.overlay?.context ?? nav.context,
+        isScrollControlled: true,
+        showDragHandle: true,
+        builder: (_) => ReportSheet(title: title, hint: hint, draft: draft, askContact: askContact, allowRecording: allowRecording),
+      );
+      if (next != 'record' || !nav.mounted) return;
+      final recorder = ScreenRecorder(maxDuration: maxRecording, maskTextFields: mask);
+      final pill = OverlayEntry(builder: (_) => _RecordingPill(recorder: recorder));
+      nav.overlay?.insert(pill);
+      recorder.start();
+      try {
+        draft.recording = await recorder.done;
+        draft.recordingLength = recorder.elapsed;
+      } finally {
+        pill.remove();
+      }
+    }
+  }
+}
+
+/// What the user has put in a report so far (kept while they record).
+class ReportDraft {
+  ReportDraft({this.screenshot});
+
+  Uint8List? screenshot;
+  bool keepScreenshot = true;
+  Uint8List? recording;
+  Duration? recordingLength;
+  final note = TextEditingController();
+  final contact = TextEditingController();
+}
+
+String _clock(Duration d) => '${d.inMinutes}:${(d.inSeconds % 60).toString().padLeft(2, '0')}';
+
+/// Shown over the app while it records: how long so far, and Stop.
+class _RecordingPill extends StatefulWidget {
+  const _RecordingPill({required this.recorder});
+
+  final ScreenRecorder recorder;
+
+  @override
+  State<_RecordingPill> createState() => _RecordingPillState();
+}
+
+class _RecordingPillState extends State<_RecordingPill> {
+  late final Timer _tick = Timer.periodic(const Duration(milliseconds: 500), (_) {
+    if (mounted) setState(() {});
+  });
+
+  @override
+  void dispose() {
+    _tick.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final left = widget.recorder.maxDuration - widget.recorder.elapsed;
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Material(
+            color: const Color(0xEE1F2328),
+            shape: const StadiumBorder(),
+            elevation: 6,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(14, 4, 4, 4),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.fiber_manual_record, color: Color(0xFFEF4444), size: 14),
+                const SizedBox(width: 8),
+                Text('Recording ${_clock(widget.recorder.elapsed)}${left.inSeconds <= 10 ? ' · ${left.inSeconds}s left' : ''}',
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontFeatures: [FontFeature.tabularFigures()])),
+                const SizedBox(width: 4),
+                TextButton(
+                  key: const Key('loggerai-record-stop'),
+                  onPressed: widget.recorder.stop,
+                  style: TextButton.styleFrom(foregroundColor: Colors.white),
+                  child: const Text('Stop'),
+                ),
+              ]),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -115,36 +226,70 @@ class LoggerAINavigatorObserver extends NavigatorObserver {
 }
 
 class ReportSheet extends StatefulWidget {
-  const ReportSheet({super.key, this.title = 'Report a problem', this.hint = 'What went wrong?'});
+  const ReportSheet({
+    super.key,
+    this.title = 'Report a problem',
+    this.hint = 'What went wrong?',
+    ReportDraft? draft,
+    this.askContact = false,
+    this.allowRecording = true,
+  }) : _draft = draft;
 
   final String title;
   final String hint;
+  final ReportDraft? _draft;
+  final bool askContact;
+  final bool allowRecording;
 
   @override
   State<ReportSheet> createState() => _ReportSheetState();
 }
 
 class _ReportSheetState extends State<ReportSheet> {
-  final _text = TextEditingController();
+  late final ReportDraft _draft = widget._draft ?? ReportDraft();
+  bool _sending = false;
   bool _sent = false;
-
-  @override
-  void dispose() {
-    _text.dispose();
-    super.dispose();
-  }
+  String? _error;
 
   Future<void> _send() async {
-    final note = _text.text.trim();
-    if (note.isEmpty) return;
-    LoggerAI.event('issue_reported', {'note': note, 'screen': LoggerAI.client?.screen});
-    await LoggerAI.flush();
-    if (mounted) setState(() => _sent = true);
+    final note = _draft.note.text.trim();
+    if (note.isEmpty) {
+      setState(() => _error = 'Tell us what went wrong.');
+      return;
+    }
+    setState(() {
+      _sending = true;
+      _error = null;
+    });
+    try {
+      await LoggerAI.report(note,
+          screenshot: _draft.keepScreenshot ? _draft.screenshot : null, recording: _draft.recording, contact: widget.askContact ? _draft.contact.text : null);
+      if (mounted) setState(() => _sent = true);
+    } on LoggerAIReportException catch (e) {
+      if (mounted) setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Widget _chip({required Widget leading, required String label, required VoidCallback onRemove, required Key removeKey}) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.fromLTRB(6, 6, 2, 6),
+      decoration: BoxDecoration(border: Border.all(color: theme.dividerColor), borderRadius: BorderRadius.circular(12)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        leading,
+        const SizedBox(width: 8),
+        Text(label, style: theme.textTheme.bodyMedium),
+        IconButton(key: removeKey, onPressed: onRemove, icon: const Icon(Icons.close, size: 18), tooltip: 'Remove', visualDensity: VisualDensity.compact),
+      ]),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final d = _draft;
     return Padding(
       padding: EdgeInsets.fromLTRB(20, 0, 20, 20 + MediaQuery.viewInsetsOf(context).bottom),
       child: _sent
@@ -155,21 +300,70 @@ class _ReportSheetState extends State<ReportSheet> {
               const SizedBox(height: 16),
               FilledButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Close')),
             ])
-          : Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-              Text(widget.title, style: theme.textTheme.titleLarge),
-              const SizedBox(height: 12),
-              TextField(
-                key: const Key('loggerai-report-text'),
-                controller: _text,
-                autofocus: true,
-                minLines: 3,
-                maxLines: 6,
-                maxLength: 2000,
-                decoration: InputDecoration(hintText: widget.hint, border: const OutlineInputBorder()),
-              ),
-              const SizedBox(height: 8),
-              FilledButton(key: const Key('loggerai-report-send'), onPressed: _send, child: const Text('Send')),
-            ]),
+          : SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                Text(widget.title, style: theme.textTheme.titleLarge),
+                const SizedBox(height: 12),
+                TextField(
+                  key: const Key('loggerai-report-text'),
+                  controller: d.note,
+                  autofocus: d.recording == null,
+                  minLines: 3,
+                  maxLines: 6,
+                  maxLength: 2000,
+                  decoration: InputDecoration(hintText: widget.hint, border: const OutlineInputBorder()),
+                ),
+                if (widget.askContact) ...[
+                  const SizedBox(height: 4),
+                  TextField(
+                    key: const Key('loggerai-report-contact'),
+                    controller: d.contact,
+                    keyboardType: TextInputType.emailAddress,
+                    decoration: const InputDecoration(labelText: 'Your email, if we may reply (optional)', border: OutlineInputBorder()),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                Wrap(spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
+                  if (d.screenshot != null && d.keepScreenshot)
+                    _chip(
+                      leading: ClipRRect(borderRadius: BorderRadius.circular(4), child: Image.memory(d.screenshot!, height: 40)),
+                      label: 'Screenshot',
+                      removeKey: const Key('loggerai-report-remove-screenshot'),
+                      onRemove: () => setState(() => d.keepScreenshot = false),
+                    ),
+                  if (d.recording != null)
+                    _chip(
+                      leading: const Icon(Icons.videocam_outlined),
+                      label: 'Recording ${_clock(d.recordingLength ?? Duration.zero)}',
+                      removeKey: const Key('loggerai-report-remove-recording'),
+                      onRemove: () => setState(() => d.recording = null),
+                    )
+                  else if (widget.allowRecording)
+                    OutlinedButton.icon(
+                      key: const Key('loggerai-report-record'),
+                      onPressed: _sending ? null : () => Navigator.of(context).pop('record'),
+                      icon: const Icon(Icons.fiber_manual_record, color: Color(0xFFEF4444), size: 16),
+                      label: const Text('Record the problem'),
+                    ),
+                ]),
+                if (widget.allowRecording && d.recording == null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text('Show us what happens, then tap Stop. Text you type is hidden in the recording.', style: theme.textTheme.bodySmall),
+                  ),
+                if (_error != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Text(_error!, style: TextStyle(color: theme.colorScheme.error)),
+                  ),
+                const SizedBox(height: 16),
+                FilledButton(
+                  key: const Key('loggerai-report-send'),
+                  onPressed: _sending ? null : _send,
+                  child: _sending ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Send'),
+                ),
+              ]),
+            ),
     );
   }
 }

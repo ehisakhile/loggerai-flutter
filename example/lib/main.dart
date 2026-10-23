@@ -98,6 +98,11 @@ class _HomePageState extends State<HomePage> {
             icon: const Icon(Icons.bug_report_outlined),
             label: const Text('Report a problem'),
           ),
+          TextButton.icon(
+            onPressed: () => LoggerAI.showMyReportsSheet(context),
+            icon: const Icon(Icons.inbox_outlined),
+            label: const Text('My reports'),
+          ),
           if (_status.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 16), child: Text(_status)),
         ],
       ),

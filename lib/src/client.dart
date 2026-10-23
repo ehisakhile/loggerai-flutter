@@ -5,12 +5,13 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'frames.dart';
 import 'platform_stub.dart' if (dart.library.io) 'platform_io.dart' as platform;
 import 'redact.dart';
 
-const sdkVersion = '0.1.2';
+const sdkVersion = '0.1.3';
 const defaultEndpoint = 'https://loggerapp.ehigiator.com/api/v1/ingest/batch';
 const _maxEvents = 1000;
 const _maxErrors = 100;
@@ -31,6 +32,8 @@ class LoggerAIOptions {
     this.enabled = true,
     this.reportEndpoint,
     this.maskTextFields = true,
+    this.networkDetails = NetworkDetails.failures,
+    this.maxBodyBytes = 4096,
   });
 
   /// The project's public key (pk_live_...). Safe to ship in the app.
@@ -65,6 +68,48 @@ class LoggerAIOptions {
 
   /// Paint over every text field in screenshots and recordings (as well as LoggerAIMask).
   final bool maskTextFields;
+
+  /// Which network calls carry their headers and bodies (masked, cut to [maxBodyBytes]).
+  /// By default only failed ones (400 and up, or no answer), which is what explains a failure.
+  final NetworkDetails networkDetails;
+  final int maxBodyBytes;
+}
+
+/// How much of a network call is recorded besides its method, address, status and time.
+enum NetworkDetails {
+  /// Nothing more.
+  none,
+
+  /// Headers and bodies of failed calls: status 400 and up, or no answer.
+  failures,
+
+  /// Headers and bodies of every call.
+  all,
+}
+
+/// A report the user sent, as they see it under "My reports".
+class MyReport {
+  MyReport({required this.id, required this.title, required this.status, required this.createdAt, this.updatedAt, this.resolvedAt});
+
+  factory MyReport.fromJson(Map<String, Object?> j) => MyReport(
+        id: (j['id'] as num).toInt(),
+        title: '${j['title'] ?? ''}',
+        status: '${j['status'] ?? 'open'}',
+        createdAt: DateTime.tryParse('${j['created_at']}Z'.replaceFirst('ZZ', 'Z')) ?? DateTime.now(),
+        updatedAt: j['updated_at'] == null ? null : DateTime.tryParse('${j['updated_at']}Z'.replaceFirst('ZZ', 'Z')),
+        resolvedAt: j['resolved_at'] == null ? null : DateTime.tryParse('${j['resolved_at']}Z'.replaceFirst('ZZ', 'Z')),
+      );
+
+  final int id;
+  final String title;
+
+  /// open, investigating or resolved.
+  final String status;
+  final DateTime createdAt;
+  final DateTime? updatedAt;
+  final DateTime? resolvedAt;
+
+  bool get resolved => status == 'resolved';
 }
 
 /// A report couldn't be sent: [message] says why, in words for the user.
@@ -123,6 +168,28 @@ class Client with WidgetsBindingObserver {
   bool _sessionSent = false;
   String? screen;
   String? user;
+
+  /// The signature of [user] from your server, so LoggerAI shows this user their reports on any device.
+  String? userHash;
+
+  /// A random id kept on this device: the user's reports on this device, when they aren't signed in.
+  String? _reporter;
+  static const _reporterKey = 'loggerai.reporter';
+
+  Future<String> reporterId() async {
+    if (_reporter != null) return _reporter!;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _reporter = prefs.getString(_reporterKey);
+      if (_reporter == null) {
+        _reporter = uuid4();
+        await prefs.setString(_reporterKey, _reporter!);
+      }
+    } catch (_) {
+      _reporter ??= uuid4(); // no storage here: this run only
+    }
+    return _reporter!;
+  }
 
   void start() {
     if (!enabled) return;
@@ -253,12 +320,18 @@ class Client with WidgetsBindingObserver {
   ///
   /// [onProgress] gets the bytes sent so far and the total as the upload goes.
   Future<int> report(String note,
-      {Uint8List? screenshot, Uint8List? recording, String? contact, Map<String, Object?>? extra, void Function(int sent, int total)? onProgress}) async {
+      {Uint8List? screenshot,
+      List<Uint8List> screenshots = const [],
+      Uint8List? recording,
+      String? contact,
+      Map<String, Object?>? extra,
+      void Function(int sent, int total)? onProgress}) async {
     final url = _reportEndpoint;
     if (!enabled || url == null) throw LoggerAIReportException('Reporting is switched off in this app.');
     event('custom_event', {'name': 'issue_reported', 'note': note, 'screen': screen});
     await flush(); // the session and its steps first, so the issue links to them
     final s = _session();
+    final reporter = await reporterId();
     final req = http.MultipartRequest('POST', url)
       ..headers['X-LoggerAI-Key'] = options.publicKey
       ..fields['report'] = jsonEncode({
@@ -266,6 +339,8 @@ class Client with WidgetsBindingObserver {
         'note': redactString(note),
         'screen': screen,
         'user': user,
+        if (userHash != null) 'user_hash': userHash,
+        'reporter': reporter,
         if (contact != null && contact.trim().isNotEmpty) 'contact': contact.trim(),
         'platform': kIsWeb ? 'browser' : 'flutter',
         'device': '${s['device']} · ${s['os']}',
@@ -274,7 +349,10 @@ class Client with WidgetsBindingObserver {
         'service': options.service,
         if (extra != null) 'extra': redact(extra),
       });
-    if (screenshot != null) req.files.add(http.MultipartFile.fromBytes('screenshot', screenshot, filename: 'screenshot.png'));
+    final shots = [if (screenshot != null) screenshot, ...screenshots].take(5).toList();
+    for (final (i, shot) in shots.indexed) {
+      req.files.add(http.MultipartFile.fromBytes('screenshot', shot, filename: 'screenshot-${i + 1}.png'));
+    }
     if (recording != null) req.files.add(http.MultipartFile.fromBytes('recording', recording, filename: 'recording.lrec'));
     final http.Response r;
     try {
@@ -292,6 +370,27 @@ class Client with WidgetsBindingObserver {
     if (r.statusCode == 429) throw LoggerAIReportException('Too many reports right now. Try again in a little while.');
     if (r.statusCode == 413) throw LoggerAIReportException('The recording is too long to send. Record a shorter one.');
     throw LoggerAIReportException("Couldn't send the report (${r.statusCode}).");
+  }
+
+  /// The reports this user sent: all of theirs when [userHash] proves who they are, otherwise
+  /// the ones sent from this device. Newest first.
+  Future<List<MyReport>> myReports() async {
+    final base = _reportEndpoint;
+    if (!enabled || base == null) throw LoggerAIReportException('Reporting is switched off in this app.');
+    final url = base.replace(path: base.path.replaceFirst(RegExp(r'/report/?$'), '/my-reports'));
+    final http.Response r;
+    try {
+      r = await _http
+          .post(url,
+              headers: {'Content-Type': 'application/json', 'X-LoggerAI-Key': options.publicKey},
+              body: jsonEncode({'reporter': await reporterId(), if (user != null) 'user': user, if (userHash != null) 'user_hash': userHash}))
+          .timeout(const Duration(seconds: 20));
+    } catch (_) {
+      throw LoggerAIReportException("Couldn't load your reports. Check your connection and try again.");
+    }
+    if (r.statusCode != 200) throw LoggerAIReportException("Couldn't load your reports (${r.statusCode}).");
+    final items = (jsonDecode(r.body) as Map)['reports'] as List? ?? const [];
+    return items.map((e) => MyReport.fromJson((e as Map).cast<String, Object?>())).toList();
   }
 
   /// Sends [req] in small pieces, counting each one as the connection takes it, so a

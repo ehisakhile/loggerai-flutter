@@ -90,12 +90,18 @@ TextButton(
 );
 ```
 
-The sheet takes a screenshot of the screen the user was on before it opens.
-**Record the problem** hides the sheet and records the screen (a few frames a
-second, up to a minute) while a small pill shows the time and **Stop**; then
-the sheet comes back with the recording, and **Send** creates the issue, with a
-progress bar while it uploads. Your team sees it on the Issues page with the
-recording, the screenshot, what the user did before it and any errors just
+The user writes what went wrong and can add up to five screenshots and one
+recording:
+
+- **Take a screenshot** closes the sheet for a moment, takes the app's screen
+  and brings the sheet back.
+- **Record the problem** hides the sheet and records the screen (a few frames a
+  second, up to a minute) while a small bar shows the time, a camera for
+  screenshots during the recording, and **Stop**.
+
+**Send** uploads it all with a progress bar, then tells the user the team has
+it, with its report number. Your team sees it on the Issues page with the
+recording, the screenshots, what the user did before it and any errors just
 before, and your Slack alert channels get a message.
 
 Text fields are painted over in screenshots and recordings, and so is anything
@@ -117,12 +123,75 @@ final recorder = ScreenRecorder()..start();
 // ...later
 final recording = await recorder.stop();
 try {
-  await LoggerAI.report(note, screenshot: shot, recording: recording,
+  await LoggerAI.report(note, screenshots: [shot!], recording: recording,
       onProgress: (sent, total) => setState(() => progress = sent / total));
 } on LoggerAIReportException catch (e) {
   showError(e.message); // in words for the user
 }
 ```
+
+## My reports
+
+Users can see the reports they sent and whether each is received, being looked
+at or resolved: from **My reports** on the report sheet, or your own button:
+
+```dart
+TextButton(onPressed: () => LoggerAI.showMyReportsSheet(context), child: const Text('My reports'));
+// or your own UI: final reports = await LoggerAI.myReports();
+```
+
+Without anything else, a user sees the reports sent from that device. So that
+signed-in users see theirs on any device, your server signs the user's id and
+the app passes the signature with it:
+
+```dart
+LoggerAI.setUser(user.id, hash: user.loggeraiHash); // from your API, e.g. in the login response
+```
+
+The signature is an HMAC-SHA256 of the user id, keyed with the SHA-256 (hex) of
+your project's **secret** key. Only your server can make it, so nobody can see
+another user's reports by guessing their id. Never put the secret key in the app.
+
+```js
+// Node.js
+const crypto = require('crypto')
+const key = crypto.createHash('sha256').update(process.env.LOGGERAI_KEY).digest('hex')
+const hash = crypto.createHmac('sha256', key).update(String(user.id)).digest('hex')
+```
+
+```python
+# Python
+import hashlib, hmac, os
+key = hashlib.sha256(os.environ["LOGGERAI_KEY"].encode()).hexdigest()
+hash = hmac.new(key.encode(), str(user.id).encode(), hashlib.sha256).hexdigest()
+```
+
+```php
+// PHP / Laravel
+$key = hash('sha256', env('LOGGERAI_KEY'));
+$hash = hash_hmac('sha256', (string) $user->id, $key);
+```
+
+```java
+// Java
+String key = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(System.getenv("LOGGERAI_KEY").getBytes(UTF_8)));
+Mac mac = Mac.getInstance("HmacSHA256");
+mac.init(new SecretKeySpec(key.getBytes(UTF_8), "HmacSHA256"));
+String hash = HexFormat.of().formatHex(mac.doFinal(String.valueOf(user.getId()).getBytes(UTF_8)));
+```
+
+If you rotate the secret key, signatures made with the old one stop working:
+sign again with the new one.
+
+## Network calls
+
+Every call your app makes is in the session's timeline with its method,
+address, status and time. A call that fails (status 400 and up, or no answer)
+also keeps its request and response headers and bodies, cut to 4 KB, so the
+team can see why: the error message your API sent back, what the app sent.
+Secrets, tokens, passwords and locations are masked in all of it, as
+everywhere else. Change it with `networkDetails`: `NetworkDetails.none`,
+`.failures` (the default) or `.all`.
 
 If you set up error handling yourself, call `LoggerAI.init(options)` after
 `WidgetsFlutterBinding.ensureInitialized()` instead of `LoggerAI.run`; it
@@ -144,6 +213,8 @@ replacing what's there.
 | `sessionTimeout` | 30 minutes in the background starts a new session |
 | `enabled` | `true` (pass `kReleaseMode` to send from release builds only) |
 | `maskTextFields` | `true`: every text field is painted over in screenshots and recordings |
+| `networkDetails` | `NetworkDetails.failures`: headers and bodies of failed calls (masked); `.none` or `.all` |
+| `maxBodyBytes` | 4096: how much of each body is kept |
 
 ## How it behaves
 

@@ -66,7 +66,15 @@ class LoggerAI {
   static void event(String name, [Map<String, Object?> data = const {}]) => _client?.event('custom_event', {'name': name, ...data});
 
   /// Count the session against a user: pass an opaque id, never an email or a name.
-  static void setUser(String? id) => _client?.user = id;
+  ///
+  /// [hash] is the signature of [id] from your server (see "My reports" in the README):
+  /// with it the user sees their reports on any device; without it, the ones sent from this device.
+  static void setUser(String? id, {String? hash}) {
+    final c = _client;
+    if (c == null) return;
+    c.user = id;
+    c.userHash = id == null ? null : hash;
+  }
 
   /// The screen the user is on, when you don't use [navigatorObserver] (or for tabs).
   static void setScreen(String name) {
@@ -86,23 +94,34 @@ class LoggerAI {
   /// Records each screen as the user moves through the app.
   static final NavigatorObserver navigatorObserver = LoggerAINavigatorObserver();
 
-  /// Sends a report from your own UI: a note, and optionally a screenshot and a
-  /// recording (see [ScreenRecorder]). Returns the issue's id; throws
-  /// [LoggerAIReportException] with a message for the user when it can't be sent.
-  /// [onProgress] gets the bytes sent and the total, to show the upload.
+  /// Sends a report from your own UI: a note, and optionally screenshots and a recording
+  /// (see [ScreenRecorder]). Returns the issue's id; throws [LoggerAIReportException]
+  /// with a message for the user when it can't be sent. [onProgress] gets the bytes
+  /// sent and the total, to show the upload.
   static Future<int> report(String note,
-      {Uint8List? screenshot, Uint8List? recording, String? contact, void Function(int sent, int total)? onProgress}) {
+      {Uint8List? screenshot,
+      List<Uint8List> screenshots = const [],
+      Uint8List? recording,
+      String? contact,
+      void Function(int sent, int total)? onProgress}) {
     final c = _client;
     if (c == null) return Future.error(LoggerAIReportException("LoggerAI isn't started."));
-    return c.report(note, screenshot: screenshot, recording: recording, contact: contact, onProgress: onProgress);
+    return c.report(note, screenshot: screenshot, screenshots: screenshots, recording: recording, contact: contact, onProgress: onProgress);
+  }
+
+  /// The reports this user sent, newest first (see [setUser] for signed-in users).
+  static Future<List<MyReport>> myReports() {
+    final c = _client;
+    if (c == null) return Future.error(LoggerAIReportException("LoggerAI isn't started."));
+    return c.myReports();
   }
 
   /// A screenshot of the app as PNG, with text fields and [LoggerAIMask] areas painted over.
   static Future<Uint8List?> screenshot() => screenshotPng(maskTextFields: _client?.options.maskTextFields ?? true);
 
-  /// "Report a problem": the user describes it, can keep a screenshot of the screen
-  /// they were on and record the screen while they show what goes wrong. The team
-  /// gets an issue with all of it and the session's steps, and a Slack message.
+  /// "Report a problem": the user describes it, can take screenshots of the app and record
+  /// the screen while they show what goes wrong. The team gets an issue with all of it and
+  /// the session's steps, and a Slack message.
   ///
   /// Call it from a button, a menu or a shake handler.
   static Future<void> showReportSheet(
@@ -111,23 +130,39 @@ class LoggerAI {
     String hint = 'What went wrong?',
     bool askContact = false,
     bool allowRecording = true,
-    bool includeScreenshot = true,
+    bool allowScreenshots = true,
+    bool showMyReports = true,
     Duration maxRecording = const Duration(seconds: 60),
+    @Deprecated('Screenshots are taken with the camera button now') bool includeScreenshot = true,
   }) async {
     final nav = Navigator.of(context, rootNavigator: true);
     final mask = _client?.options.maskTextFields ?? true;
-    // The picture is of the screen they were on, before the sheet covers it.
-    final draft = ReportDraft(screenshot: includeScreenshot ? await screenshotPng(maskTextFields: mask) : null);
+    final draft = ReportDraft();
     while (nav.mounted) {
       final next = await showModalBottomSheet<String>(
         context: nav.overlay?.context ?? nav.context,
         isScrollControlled: true,
         showDragHandle: true,
-        builder: (_) => ReportSheet(title: title, hint: hint, draft: draft, askContact: askContact, allowRecording: allowRecording),
+        builder: (_) => ReportSheet(
+            title: title, hint: hint, draft: draft, askContact: askContact, allowRecording: allowRecording, allowScreenshots: allowScreenshots, showMyReports: showMyReports),
       );
-      if (next != 'record' || !nav.mounted) return;
+      if (!nav.mounted) return;
+      if (next == 'screenshot') {
+        // The sheet has closed: wait for the screen under it to be drawn, then take it.
+        await WidgetsBinding.instance.endOfFrame;
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        final shot = await screenshotPng(maskTextFields: mask);
+        if (shot != null) draft.screenshots.add(shot);
+        continue;
+      }
+      if (next == 'my-reports') {
+        if (nav.mounted) await showMyReportsSheet(nav.overlay?.context ?? nav.context);
+        return;
+      }
+      if (next != 'record') return;
       final recorder = ScreenRecorder(maxDuration: maxRecording, maskTextFields: mask);
-      final pill = OverlayEntry(builder: (_) => _RecordingPill(recorder: recorder));
+      final pill = OverlayEntry(
+          builder: (_) => _RecordingPill(recorder: recorder, allowScreenshots: allowScreenshots, draft: draft, maskTextFields: mask));
       nav.overlay?.insert(pill);
       recorder.start();
       try {
@@ -138,46 +173,88 @@ class LoggerAI {
       }
     }
   }
+
+  /// "My reports": what this user sent, open and resolved.
+  static Future<void> showMyReportsSheet(BuildContext context, {String title = 'My reports'}) {
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => MyReportsSheet(title: title),
+    );
+  }
 }
 
-/// What the user has put in a report so far (kept while they record).
+/// What the user has put in a report so far (kept while they record or take screenshots).
 class ReportDraft {
-  ReportDraft({this.screenshot});
+  ReportDraft();
 
-  Uint8List? screenshot;
-  bool keepScreenshot = true;
+  static const maxScreenshots = 5;
+
+  final screenshots = <Uint8List>[];
   Uint8List? recording;
   Duration? recordingLength;
   final note = TextEditingController();
   final contact = TextEditingController();
+
+  bool get screenshotsFull => screenshots.length >= maxScreenshots;
 }
 
 String _clock(Duration d) => '${d.inMinutes}:${(d.inSeconds % 60).toString().padLeft(2, '0')}';
 
-/// Shown over the app while it records: how long so far, and Stop.
+/// Shown over the app while it records: the time so far, a camera for a screenshot, and Stop.
 class _RecordingPill extends StatefulWidget {
-  const _RecordingPill({required this.recorder});
+  const _RecordingPill({required this.recorder, required this.draft, required this.allowScreenshots, required this.maskTextFields});
 
   final ScreenRecorder recorder;
+  final ReportDraft draft;
+  final bool allowScreenshots;
+  final bool maskTextFields;
 
   @override
   State<_RecordingPill> createState() => _RecordingPillState();
 }
 
 class _RecordingPillState extends State<_RecordingPill> {
-  late final Timer _tick = Timer.periodic(const Duration(milliseconds: 500), (_) {
-    if (mounted) setState(() {});
-  });
+  Timer? _tick;
+  bool _hidden = false; // while a screenshot is taken, so the pill isn't in it
+  bool _flash = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _tick = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      if (mounted) setState(() {});
+    });
+  }
 
   @override
   void dispose() {
-    _tick.cancel();
+    _tick?.cancel();
     super.dispose();
+  }
+
+  Future<void> _screenshot() async {
+    if (widget.draft.screenshotsFull) return;
+    setState(() => _hidden = true);
+    await WidgetsBinding.instance.endOfFrame;
+    final shot = await screenshotPng(maskTextFields: widget.maskTextFields);
+    if (shot != null) widget.draft.screenshots.add(shot);
+    if (!mounted) return;
+    setState(() {
+      _hidden = false;
+      _flash = shot != null;
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 900));
+    if (mounted) setState(() => _flash = false);
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_hidden) return const SizedBox.shrink();
     final left = widget.recorder.maxDuration - widget.recorder.elapsed;
+    final shots = widget.draft.screenshots.length;
+    const white = TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontFeatures: [FontFeature.tabularFigures()]);
     return SafeArea(
       child: Align(
         alignment: Alignment.topCenter,
@@ -192,9 +269,24 @@ class _RecordingPillState extends State<_RecordingPill> {
               child: Row(mainAxisSize: MainAxisSize.min, children: [
                 const Icon(Icons.fiber_manual_record, color: Color(0xFFEF4444), size: 14),
                 const SizedBox(width: 8),
-                Text('Recording ${_clock(widget.recorder.elapsed)}${left.inSeconds <= 10 ? ' · ${left.inSeconds}s left' : ''}',
-                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontFeatures: [FontFeature.tabularFigures()])),
-                const SizedBox(width: 4),
+                Text(
+                  _flash ? 'Screenshot saved' : 'Recording ${_clock(widget.recorder.elapsed)}${left.inSeconds <= 10 ? ' · ${left.inSeconds}s left' : ''}',
+                  key: const Key('loggerai-record-clock'),
+                  style: white,
+                ),
+                if (widget.allowScreenshots) ...[
+                  const SizedBox(width: 4),
+                  IconButton(
+                    key: const Key('loggerai-record-screenshot'),
+                    onPressed: widget.draft.screenshotsFull ? null : _screenshot,
+                    tooltip: widget.draft.screenshotsFull ? 'Up to ${ReportDraft.maxScreenshots} screenshots' : 'Take a screenshot',
+                    icon: Badge(
+                      isLabelVisible: shots > 0,
+                      label: Text('$shots'),
+                      child: const Icon(Icons.photo_camera_outlined, color: Colors.white, size: 20),
+                    ),
+                  ),
+                ],
                 TextButton(
                   key: const Key('loggerai-record-stop'),
                   onPressed: widget.recorder.stop,
@@ -235,6 +327,8 @@ class ReportSheet extends StatefulWidget {
     ReportDraft? draft,
     this.askContact = false,
     this.allowRecording = true,
+    this.allowScreenshots = true,
+    this.showMyReports = true,
   }) : _draft = draft;
 
   final String title;
@@ -242,6 +336,8 @@ class ReportSheet extends StatefulWidget {
   final ReportDraft? _draft;
   final bool askContact;
   final bool allowRecording;
+  final bool allowScreenshots;
+  final bool showMyReports;
 
   @override
   State<ReportSheet> createState() => _ReportSheetState();
@@ -250,7 +346,7 @@ class ReportSheet extends StatefulWidget {
 class _ReportSheetState extends State<ReportSheet> {
   late final ReportDraft _draft = widget._draft ?? ReportDraft();
   bool _sending = false;
-  bool _sent = false;
+  int? _sentId;
   String? _error;
   // Upload progress, 0..1; null while getting ready (before any bytes go out).
   double? _progress;
@@ -267,13 +363,13 @@ class _ReportSheetState extends State<ReportSheet> {
       _error = null;
     });
     try {
-      await LoggerAI.report(note,
-          screenshot: _draft.keepScreenshot ? _draft.screenshot : null,
+      final id = await LoggerAI.report(note,
+          screenshots: _draft.screenshots,
           recording: _draft.recording,
           contact: widget.askContact ? _draft.contact.text : null, onProgress: (sent, total) {
         if (mounted && total > 0) setState(() => _progress = sent / total);
       });
-      if (mounted) setState(() => _sent = true);
+      if (mounted) setState(() => _sentId = id);
     } on LoggerAIReportException catch (e) {
       if (mounted) setState(() => _error = e.message);
     } finally {
@@ -303,28 +399,81 @@ class _ReportSheetState extends State<ReportSheet> {
     );
   }
 
+  Widget _sent(ThemeData theme) {
+    final scheme = theme.colorScheme;
+    final contact = widget.askContact ? _draft.contact.text.trim() : '';
+    final parts = [
+      'your note',
+      if (_draft.screenshots.isNotEmpty) _draft.screenshots.length == 1 ? 'the screenshot' : '${_draft.screenshots.length} screenshots',
+      if (_draft.recording != null) 'the recording',
+    ];
+    final what = parts.length == 1 ? parts.first : '${parts.sublist(0, parts.length - 1).join(', ')} and ${parts.last}';
+    return Column(key: const Key('loggerai-report-sent'), mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      const SizedBox(height: 4),
+      Center(
+        child: Container(
+          width: 64,
+          height: 64,
+          decoration: BoxDecoration(color: scheme.primaryContainer, shape: BoxShape.circle),
+          child: Icon(Icons.mark_email_read_outlined, size: 32, color: scheme.onPrimaryContainer),
+        ),
+      ),
+      const SizedBox(height: 16),
+      Text('The team has your report', style: theme.textTheme.titleLarge, textAlign: TextAlign.center),
+      const SizedBox(height: 8),
+      Text(
+        'They have $what, and what happened in the app before it. They\'ll look into it and get back to you'
+        '${contact.isNotEmpty ? ' at $contact' : ''}.',
+        style: theme.textTheme.bodyMedium?.copyWith(color: scheme.onSurfaceVariant),
+        textAlign: TextAlign.center,
+      ),
+      if ((_sentId ?? 0) > 0) ...[
+        const SizedBox(height: 12),
+        Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(color: scheme.surfaceContainerHighest, borderRadius: BorderRadius.circular(999)),
+            child: Text('Report #$_sentId', style: theme.textTheme.labelLarge),
+          ),
+        ),
+      ],
+      const SizedBox(height: 20),
+      FilledButton(key: const Key('loggerai-report-done'), onPressed: () => Navigator.of(context).pop(), child: const Text('Done')),
+      if (widget.showMyReports) ...[
+        const SizedBox(height: 4),
+        TextButton(
+          key: const Key('loggerai-report-see-mine'),
+          onPressed: () => Navigator.of(context).pop('my-reports'),
+          child: const Text('See my reports'),
+        ),
+      ],
+    ]);
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final d = _draft;
     return Padding(
       padding: EdgeInsets.fromLTRB(20, 0, 20, 20 + MediaQuery.viewInsetsOf(context).bottom),
-      child: _sent
-          ? Column(mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.check_circle_outline, size: 40),
-              const SizedBox(height: 12),
-              Text('Thanks: the team can see what happened.', style: theme.textTheme.titleMedium, textAlign: TextAlign.center),
-              const SizedBox(height: 16),
-              FilledButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Close')),
-            ])
+      child: _sentId != null
+          ? _sent(theme)
           : SingleChildScrollView(
               child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                Text(widget.title, style: theme.textTheme.titleLarge),
+                Row(children: [
+                  Expanded(child: Text(widget.title, style: theme.textTheme.titleLarge)),
+                  if (widget.showMyReports)
+                    TextButton(
+                      key: const Key('loggerai-report-my-reports'),
+                      onPressed: _sending ? null : () => Navigator.of(context).pop('my-reports'),
+                      child: const Text('My reports'),
+                    ),
+                ]),
                 const SizedBox(height: 12),
                 TextField(
                   key: const Key('loggerai-report-text'),
                   controller: d.note,
-                  autofocus: d.recording == null,
+                  autofocus: d.recording == null && d.screenshots.isEmpty,
                   minLines: 3,
                   maxLines: 6,
                   maxLength: 2000,
@@ -341,12 +490,12 @@ class _ReportSheetState extends State<ReportSheet> {
                   const SizedBox(height: 12),
                 ],
                 Wrap(spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
-                  if (d.screenshot != null && d.keepScreenshot)
+                  for (final (i, shot) in d.screenshots.indexed)
                     _chip(
-                      leading: ClipRRect(borderRadius: BorderRadius.circular(4), child: Image.memory(d.screenshot!, height: 40)),
-                      label: 'Screenshot',
-                      removeKey: const Key('loggerai-report-remove-screenshot'),
-                      onRemove: () => setState(() => d.keepScreenshot = false),
+                      leading: ClipRRect(borderRadius: BorderRadius.circular(4), child: Image.memory(shot, height: 40)),
+                      label: d.screenshots.length == 1 ? 'Screenshot' : 'Screenshot ${i + 1}',
+                      removeKey: Key('loggerai-report-remove-screenshot-$i'),
+                      onRemove: () => setState(() => d.screenshots.removeAt(i)),
                     ),
                   if (d.recording != null)
                     _chip(
@@ -354,8 +503,18 @@ class _ReportSheetState extends State<ReportSheet> {
                       label: 'Recording ${_clock(d.recordingLength ?? Duration.zero)}',
                       removeKey: const Key('loggerai-report-remove-recording'),
                       onRemove: () => setState(() => d.recording = null),
-                    )
-                  else if (widget.allowRecording)
+                    ),
+                ]),
+                if (d.screenshots.isNotEmpty || d.recording != null) const SizedBox(height: 8),
+                Wrap(spacing: 8, runSpacing: 8, children: [
+                  if (widget.allowScreenshots && !d.screenshotsFull)
+                    OutlinedButton.icon(
+                      key: const Key('loggerai-report-screenshot'),
+                      onPressed: _sending ? null : () => Navigator.of(context).pop('screenshot'),
+                      icon: const Icon(Icons.photo_camera_outlined, size: 18),
+                      label: const Text('Take a screenshot'),
+                    ),
+                  if (widget.allowRecording && d.recording == null)
                     OutlinedButton.icon(
                       key: const Key('loggerai-report-record'),
                       onPressed: _sending ? null : () => Navigator.of(context).pop('record'),
@@ -363,10 +522,15 @@ class _ReportSheetState extends State<ReportSheet> {
                       label: const Text('Record the problem'),
                     ),
                 ]),
-                if (widget.allowRecording && d.recording == null)
+                if ((widget.allowRecording && d.recording == null) || widget.allowScreenshots)
                   Padding(
                     padding: const EdgeInsets.only(top: 6),
-                    child: Text('Show us what happens, then tap Stop. Text you type is hidden in the recording.', style: theme.textTheme.bodySmall),
+                    child: Text(
+                      widget.allowRecording && d.recording == null
+                          ? 'Show us what happens, then tap Stop; the camera on the recording bar takes screenshots too. Text you type is hidden.'
+                          : 'The sheet closes for a moment to take the screenshot. Text you type is hidden.',
+                      style: theme.textTheme.bodySmall,
+                    ),
                   ),
                 if (_error != null)
                   Padding(
@@ -390,6 +554,118 @@ class _ReportSheetState extends State<ReportSheet> {
                 ),
               ]),
             ),
+    );
+  }
+}
+
+/// "My reports": the reports this user sent, open ones first, with where each one is.
+class MyReportsSheet extends StatefulWidget {
+  const MyReportsSheet({super.key, this.title = 'My reports'});
+
+  final String title;
+
+  @override
+  State<MyReportsSheet> createState() => _MyReportsSheetState();
+}
+
+class _MyReportsSheetState extends State<MyReportsSheet> {
+  late Future<List<MyReport>> _load = LoggerAI.myReports();
+  bool _resolved = false;
+
+  static const _label = {'open': 'Received', 'investigating': 'Being looked at', 'resolved': 'Resolved'};
+
+  String _when(DateTime t) {
+    final d = DateTime.now().difference(t.toLocal());
+    if (d.inMinutes < 1) return 'just now';
+    if (d.inHours < 1) return '${d.inMinutes} min ago';
+    if (d.inDays < 1) return '${d.inHours} h ago';
+    if (d.inDays < 30) return '${d.inDays} d ago';
+    final l = t.toLocal();
+    return '${l.day}/${l.month}/${l.year}';
+  }
+
+  Widget _status(ThemeData theme, String status) {
+    final scheme = theme.colorScheme;
+    final (bg, fg) = switch (status) {
+      'resolved' => (scheme.primaryContainer, scheme.onPrimaryContainer),
+      'investigating' => (scheme.tertiaryContainer, scheme.onTertiaryContainer),
+      _ => (scheme.surfaceContainerHighest, scheme.onSurfaceVariant),
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(999)),
+      child: Text(_label[status] ?? status, style: theme.textTheme.labelMedium?.copyWith(color: fg)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return SizedBox(
+      height: MediaQuery.sizeOf(context).height * 0.7,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Text(widget.title, style: theme.textTheme.titleLarge),
+          const SizedBox(height: 12),
+          SegmentedButton<bool>(
+            key: const Key('loggerai-my-reports-tabs'),
+            segments: const [
+              ButtonSegment(value: false, label: Text('Open'), icon: Icon(Icons.inbox_outlined)),
+              ButtonSegment(value: true, label: Text('Resolved'), icon: Icon(Icons.task_alt)),
+            ],
+            selected: {_resolved},
+            onSelectionChanged: (s) => setState(() => _resolved = s.first),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: FutureBuilder<List<MyReport>>(
+              future: _load,
+              builder: (context, snap) {
+                if (snap.connectionState != ConnectionState.done) return const Center(child: CircularProgressIndicator());
+                if (snap.hasError) {
+                  return Center(
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      Text('${snap.error}', textAlign: TextAlign.center),
+                      const SizedBox(height: 8),
+                      TextButton(onPressed: () => setState(() => _load = LoggerAI.myReports()), child: const Text('Try again')),
+                    ]),
+                  );
+                }
+                final items = (snap.data ?? const <MyReport>[]).where((r) => r.resolved == _resolved).toList();
+                if (items.isEmpty) {
+                  return Center(
+                    child: Text(_resolved ? 'Nothing resolved yet.' : 'No open reports. If something goes wrong, tell us from Report a problem.',
+                        textAlign: TextAlign.center, style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+                  );
+                }
+                return RefreshIndicator(
+                  onRefresh: () async {
+                    final next = LoggerAI.myReports();
+                    setState(() => _load = next);
+                    await next.catchError((_) => <MyReport>[]);
+                  },
+                  child: ListView.separated(
+                    key: const Key('loggerai-my-reports-list'),
+                    itemCount: items.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (_, i) {
+                      final r = items[i];
+                      return ListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(r.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+                        subtitle: Text(
+                            'Report #${r.id} · sent ${_when(r.createdAt)}${r.resolvedAt != null ? ' · resolved ${_when(r.resolvedAt!)}' : ''}'),
+                        trailing: _status(theme, r.status),
+                      );
+                    },
+                  ),
+                );
+              },
+            ),
+          ),
+        ]),
+      ),
     );
   }
 }

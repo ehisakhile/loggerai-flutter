@@ -4,6 +4,6 @@
 library;
 
 export 'src/capture.dart' show LoggerAIMask, ScreenRecorder;
-export 'src/client.dart' show LoggerAIOptions, Client, LoggerAIReportException;
+export 'src/client.dart' show LoggerAIOptions, Client, LoggerAIReportException, MyReport, NetworkDetails;
 export 'src/loggerai.dart';
 export 'src/redact.dart' show redact, redactString, redactUrl, isSensitive;

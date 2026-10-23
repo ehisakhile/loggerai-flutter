@@ -1,3 +1,15 @@
+## 0.1.3
+
+* The recording bar's clock runs (it only moved when something else redrew the screen).
+* No screenshot is taken when the sheet opens. **Take a screenshot** in the sheet and a camera on the recording
+  bar add up to five, each one removable.
+* After sending: "The team has your report", what they received, the report number and **See my reports**.
+* Failed network calls (400 and up, or no answer) keep their headers and bodies, masked and cut to 4 KB, so the
+  timeline shows why they failed. `networkDetails` and `maxBodyBytes` change it.
+* **My reports** (`LoggerAI.showMyReportsSheet`, `LoggerAI.myReports()`): the user's reports, open and resolved.
+  `setUser(id, hash: ...)` with a signature from your server shows them on any device; otherwise the ones sent
+  from this device.
+
 ## 0.1.2
 
 * The report sheet shows the upload: a progress bar with "Uploading recording… 45%", then "Almost done…" while

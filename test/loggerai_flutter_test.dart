@@ -60,6 +60,11 @@ class Fake {
         req.response.statusCode = 401;
         req.response.headers.contentType = ContentType.json;
         req.response.write(jsonEncode({'detail': 'Token expired', 'token': 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U'}));
+      } else if (req.uri.path == '/emergency-contacts') {
+        // A validation error that echoes what was sent, as FastAPI does.
+        req.response.statusCode = 422;
+        req.response.headers.contentType = ContentType.json;
+        req.response.write(jsonEncode({'detail': [{'msg': 'phone is not valid', 'input': jsonDecode(body)}]}));
       } else if (req.uri.path == '/ingest/batch') {
         batches.add(jsonDecode(body) as Map<String, dynamic>);
         keys.add(req.headers.value('x-loggerai-key'));
@@ -91,7 +96,7 @@ void main() {
   setUp(() => HttpOverrides.global = null);
   tearDownAll(() => fake.server.close(force: true));
 
-  LoggerAIOptions opts() => LoggerAIOptions(
+  LoggerAIOptions opts({List<String> maskKeys = const []}) => LoggerAIOptions(
         publicKey: 'pk_live_test',
         endpoint: fake.ingest,
         service: 'mobile',
@@ -99,6 +104,7 @@ void main() {
         appPackages: const ['shop'],
         traceHosts: const ['127.0.0.1'],
         flushInterval: const Duration(minutes: 5),
+        maskKeys: maskKeys,
       );
 
   test('errors, screens and events go out in one session', () async {
@@ -187,6 +193,32 @@ void main() {
     expect(isSensitive('page'), isFalse);
     expect(redactUrl('https://u:pw@a.b/c?key=k&page=2'), allOf(contains('page=2'), isNot(contains('key=k')), isNot(contains('pw'))));
     expect(redactString('Authorization: Bearer abcdefghijklmnop1234'), 'Authorization: Bearer [REDACTED]');
+  });
+
+  test('personal details are never kept: phones, emails, addresses, postcodes, names, dates of birth', () {
+    expect(
+        redact({
+          'phone': '08031234567', 'phone_number': '+2348031234567', 'contactPhone': 8031234567, 'email': 'ada@example.com',
+          'emails': ['a@b.co'], 'static_address': '12 Allen Avenue, Ikeja', 'share_postcode': 'LA 15 A14 AV 11', 'first_name': 'Ada',
+          'lastName': 'Obi', 'full_name': 'Ada Obi', 'date_of_birth': '1990-01-01', 'dob': '1990-01-01',
+          // kept: flags about these, and ordinary fields
+          'send_email': true, 'email_enabled': false, 'state_name': 'Lagos', 'name': 'issue_reported', 'page': 2,
+        }),
+        {
+          'phone': '[REDACTED]', 'phone_number': '[REDACTED]', 'contactPhone': '[REDACTED]', 'email': '[REDACTED]',
+          'emails': '[REDACTED]', 'static_address': '[REDACTED]', 'share_postcode': '[REDACTED]', 'first_name': '[REDACTED]',
+          'lastName': '[REDACTED]', 'full_name': '[REDACTED]', 'date_of_birth': '[REDACTED]', 'dob': '[REDACTED]',
+          'send_email': true, 'email_enabled': false, 'state_name': 'Lagos', 'name': 'issue_reported', 'page': 2,
+        });
+    expect(redactUrl('https://a.b/users?email=ada%40example.com&phone=0803&page=2'),
+        allOf(contains('email=[REDACTED]'), contains('phone=[REDACTED]'), contains('page=2')));
+    expect(redactString('Write to ada.obi@mail.example.ng or call +234 803 123 4567, or 0803 123 4567, or 08031234567'),
+        'Write to [REDACTED_EMAIL] or call [REDACTED_PHONE], or [REDACTED_PHONE], or [REDACTED_PHONE]');
+    // not phone numbers: ids, timestamps, versions, amounts
+    expect(redactString('order 1729612345678 at 2026-10-23, v3.12.1, ₦08000.50 id 0803'), 'order 1729612345678 at 2026-10-23, v3.12.1, ₦08000.50 id 0803');
+    expect(redact({'extra': {'Safety-ID': 'K7', 'safety_id': 'K7', 'other': 'x'}}, 0, {'safetyid'}), {
+      'extra': {'Safety-ID': '[REDACTED]', 'safety_id': '[REDACTED]', 'other': 'x'}
+    });
   });
 
   test('locations are never kept', () {
@@ -439,6 +471,26 @@ void main() {
     expect(ok['status'], 200);
     expect(ok.containsKey('response_data'), isFalse);
     expect(ok.containsKey('request_headers'), isFalse);
+  });
+
+  test("a failed call's body: personal details and the app's maskKeys are masked, the error is kept", () async {
+    LoggerAI.init(opts(maskKeys: const ['name', 'safety_id']));
+    LoggerAI.event('contact_saved', {'relationship': 'Mother'});
+    await http.post(Uri.parse(fake.api('/emergency-contacts')),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'name': 'Mum', 'phone': '08031234567', 'relationship': 'Mother', 'safety_id': 'LA 15 A14 AV 11 · K7'}));
+    await LoggerAI.flush();
+    final bad = fake.all('events').where((e) => e['type'] == 'network_request').map((e) => e['payload'] as Map).lastWhere((p) => (p['url'] as String).contains('/emergency-contacts'));
+    expect(bad['status'], 422);
+    expect(bad['request_payload'], {'name': '[REDACTED]', 'phone': '[REDACTED]', 'relationship': 'Mother', 'safety_id': '[REDACTED]'});
+    final detail = ((bad['response_data'] as Map)['detail'] as List).first as Map;
+    expect(detail['msg'], 'phone is not valid');
+    expect(detail['input'], {'name': '[REDACTED]', 'phone': '[REDACTED]', 'relationship': 'Mother', 'safety_id': '[REDACTED]'});
+    expect(jsonEncode(bad), allOf(isNot(contains('Mum')), isNot(contains('0803')), isNot(contains('K7'))));
+    // maskKeys are for the app's network calls: the SDK's own events keep their names
+    final ev = fake.all('events').where((e) => e['type'] == 'custom_event').map((e) => e['payload'] as Map).toList();
+    expect(ev.map((p) => p['name']), contains('contact_saved'));
+    expect(ev.every((p) => p['name'] != '[REDACTED]'), isTrue);
   });
 
   test('my reports: the device id and the signed user go with the question', () async {

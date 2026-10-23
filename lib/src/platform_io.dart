@@ -11,6 +11,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'client.dart';
+import 'redact.dart';
 
 String osName() {
   final v = Platform.operatingSystemVersion;
@@ -100,12 +101,14 @@ class _Call {
       'screen': client.screen,
     };
     if (details) {
-      if (requestHeaders != null) p['request_headers'] = requestHeaders;
-      if (requestBody.length > 0) p['request_payload'] = _body(requestBody, requestType);
-      if (responseHeaders != null) p['response_headers'] = responseHeaders;
-      if (responseBody.length > 0) p['response_data'] = _body(responseBody, responseType);
+      // the app's own maskKeys here; event() then masks secrets, personal details and locations in all of it
+      final extra = client.maskKeys;
+      if (requestHeaders != null) p['request_headers'] = redact(requestHeaders, 0, extra);
+      if (requestBody.length > 0) p['request_payload'] = redact(_body(requestBody, requestType), 0, extra);
+      if (responseHeaders != null) p['response_headers'] = redact(responseHeaders, 0, extra);
+      if (responseBody.length > 0) p['response_data'] = redact(_body(responseBody, responseType), 0, extra);
     }
-    client.event('network_request', p); // event() masks secrets and locations in all of it
+    client.event('network_request', p);
   }
 }
 

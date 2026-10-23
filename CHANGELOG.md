@@ -1,3 +1,13 @@
+## 0.1.5
+
+* Personal details are never kept: fields such as `phone`, `phone_number`, `email`, `address`, `postcode`,
+  `first_name`, `last_name`, `full_name`, `date_of_birth` and `dob` are masked when they hold text or numbers (flags
+  like `send_email: true` stay), and so are email addresses and phone numbers (`+234 803 123 4567`,
+  `0803 123 4567`) anywhere in text, URLs included.
+* `maskKeys`: more field names to mask in network calls' headers and bodies, for the app's own personal fields
+  (`['name', 'safety_id']`). Your events keep their names.
+* `isPersonal(key)` is exported next to `isSensitive`.
+
 ## 0.1.4
 
 * Failed calls made with **Dio** now keep their response body too. Dio reads responses through `cast()` and sets

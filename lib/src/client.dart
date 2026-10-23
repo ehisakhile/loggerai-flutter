@@ -11,7 +11,7 @@ import 'frames.dart';
 import 'platform_stub.dart' if (dart.library.io) 'platform_io.dart' as platform;
 import 'redact.dart';
 
-const sdkVersion = '0.1.4';
+const sdkVersion = '0.1.5';
 const defaultEndpoint = 'https://loggerapp.ehigiator.com/api/v1/ingest/batch';
 const _maxEvents = 1000;
 const _maxErrors = 100;
@@ -34,6 +34,7 @@ class LoggerAIOptions {
     this.maskTextFields = true,
     this.networkDetails = NetworkDetails.failures,
     this.maxBodyBytes = 4096,
+    this.maskKeys = const [],
   });
 
   /// The project's public key (pk_live_...). Safe to ship in the app.
@@ -73,6 +74,12 @@ class LoggerAIOptions {
   /// By default only failed ones (400 and up, or no answer), which is what explains a failure.
   final NetworkDetails networkDetails;
   final int maxBodyBytes;
+
+  /// More field names to mask in network calls' headers and bodies, for your app's own
+  /// personal fields (`['name', 'safety_id']`). Matched without case, `_` or `-`.
+  /// Secrets, locations, phone numbers, emails, addresses and names like
+  /// `first_name` are masked already.
+  final List<String> maskKeys;
 }
 
 /// How much of a network call is recorded besides its method, address, status and time.
@@ -149,6 +156,9 @@ class Client with WidgetsBindingObserver {
   }
 
   final LoggerAIOptions options;
+
+  /// [LoggerAIOptions.maskKeys], ready to compare.
+  late final Set<String> maskKeys = {for (final k in options.maskKeys) normalizeKey(k)};
   bool enabled;
   Uri? _endpoint;
   Uri? _reportEndpoint;

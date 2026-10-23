@@ -17,11 +17,12 @@ your server's monitoring, with AI that explains what went wrong.
   team gets an issue with all of it and the session's steps, and a message in
   Slack.
 
-Secrets (passwords, tokens, cookies, API keys, JWTs) and locations
-(`lat`, `lng`, `user_lat`, `latitude`... and coordinate pairs in paths) are
-masked before anything leaves the app, and request and response bodies are
-never sent. So network capture is safe to leave on even when your API puts
-the user's position in the URL.
+Secrets (passwords, tokens, cookies, API keys, JWTs), personal details
+(phone numbers, emails, addresses, postcodes, names like `first_name`, dates of
+birth) and locations (`lat`, `lng`, `user_lat`, `latitude`... and coordinate
+pairs in paths) are masked before anything leaves the app. Bodies are kept only
+for failed calls, masked the same way. So network capture is safe to leave on
+even when your API puts the user's position in the URL.
 Android, iOS, macOS, Windows and Linux; on the web everything but network
 capture.
 
@@ -189,9 +190,23 @@ Every call your app makes is in the session's timeline with its method,
 address, status and time. A call that fails (status 400 and up, or no answer)
 also keeps its request and response headers and bodies, cut to 4 KB, so the
 team can see why: the error message your API sent back, what the app sent.
-Secrets, tokens, passwords and locations are masked in all of it, as
-everywhere else. Change it with `networkDetails`: `NetworkDetails.none`,
-`.failures` (the default) or `.all`.
+Secrets, tokens, passwords, personal details and locations are masked in all
+of it, as everywhere else: fields such as `phone`, `email`, `address`,
+`postcode`, `first_name`, `full_name` and `date_of_birth`, and email addresses
+and phone numbers (`+234 803 123 4567`, `0803 123 4567`) anywhere in text.
+Change it with `networkDetails`: `NetworkDetails.none`, `.failures` (the
+default) or `.all`.
+
+Fields that only your app knows are personal go in `maskKeys`. They apply to
+network calls' headers and bodies (matched without case, `_` or `-`), so a
+plain `name` can be masked there without touching your events' names:
+
+```dart
+LoggerAIOptions(
+  publicKey: 'pk_live_...',
+  maskKeys: ['name', 'safety_id', 'device_name'],
+)
+```
 
 If you set up error handling yourself, call `LoggerAI.init(options)` after
 `WidgetsFlutterBinding.ensureInitialized()` instead of `LoggerAI.run`; it
@@ -215,6 +230,7 @@ replacing what's there.
 | `maskTextFields` | `true`: every text field is painted over in screenshots and recordings |
 | `networkDetails` | `NetworkDetails.failures`: headers and bodies of failed calls (masked); `.none` or `.all` |
 | `maxBodyBytes` | 4096: how much of each body is kept |
+| `maskKeys` | none: more field names to mask in network calls (personal details and secrets are masked already) |
 
 ## How it behaves
 

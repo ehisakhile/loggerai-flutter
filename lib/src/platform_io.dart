@@ -359,25 +359,29 @@ class _LoggedResponse extends Stream<List<int>> implements HttpClientResponse {
   final HttpClientResponse _inner;
   final _Call _call;
 
+  /// The body as the app reads it. The copy is made inside the stream, not in the listener: libraries
+  /// such as Dio listen first (through cast()) and set their handlers afterwards, which would replace ours.
+  late final Stream<List<int>> _body = !_call.details
+      ? _inner
+      : _inner.transform(StreamTransformer<List<int>, List<int>>.fromHandlers(
+          handleData: (d, sink) {
+            _call.responseBody.add(d);
+            sink.add(d);
+          },
+          handleError: (Object e, StackTrace s, sink) {
+            _call.send(e);
+            sink.addError(e, s);
+          },
+          handleDone: (sink) {
+            _call.send();
+            sink.close();
+          },
+        ));
+
   @override
   StreamSubscription<List<int>> listen(void Function(List<int> event)? onData,
-      {Function? onError, void Function()? onDone, bool? cancelOnError}) {
-    if (!_call.details) return _inner.listen(onData, onError: onError, onDone: onDone, cancelOnError: cancelOnError);
-    return _inner.listen((d) {
-      _call.responseBody.add(d);
-      onData?.call(d);
-    }, onError: (Object e, StackTrace s) {
-      _call.send(e);
-      if (onError is void Function(Object, StackTrace)) {
-        onError(e, s);
-      } else if (onError is void Function(Object)) {
-        onError(e);
-      }
-    }, onDone: () {
-      _call.send();
-      onDone?.call();
-    }, cancelOnError: cancelOnError);
-  }
+          {Function? onError, void Function()? onDone, bool? cancelOnError}) =>
+      _body.listen(onData, onError: onError, onDone: onDone, cancelOnError: cancelOnError);
 
   @override
   int get statusCode => _inner.statusCode;

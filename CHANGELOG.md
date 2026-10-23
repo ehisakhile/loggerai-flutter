@@ -1,3 +1,9 @@
+## 0.1.4
+
+* Failed calls made with **Dio** now keep their response body too. Dio reads responses through `cast()` and sets
+  its handlers after listening, which bypassed the copy; the copy is now made inside the stream, so it works
+  however a library reads the body. Calls with package:http and HttpClient were already fine.
+
 ## 0.1.3
 
 * The recording bar's clock runs (it only moved when something else redrew the screen).

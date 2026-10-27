@@ -510,9 +510,13 @@ void main() {
     expect(list.last.resolvedAt, isNotNull);
   });
 
-  testWidgets('the My reports sheet: open and resolved', (tester) async {
+  testWidgets("the My reports sheet: open and resolved, in the app's colours", (tester) async {
     await tester.runAsync(() async => LoggerAI.init(opts()));
+    const brand = Color(0xFF17A34A);
+    // An app that sets its primary colour and leaves the rest at Flutter's defaults (a teal secondary).
+    final theme = ThemeData(colorScheme: const ColorScheme.light().copyWith(primary: brand, onPrimary: Colors.white));
     await tester.pumpWidget(MaterialApp(
+        theme: theme,
         home: Builder(builder: (c) => Scaffold(body: Center(child: ElevatedButton(onPressed: () => LoggerAI.showMyReportsSheet(c), child: const Text('mine')))))));
     Future<void> real(int ms) => tester.runAsync(() => Future<void>.delayed(Duration(milliseconds: ms)));
     await tester.tap(find.text('mine'));
@@ -523,10 +527,17 @@ void main() {
     expect(find.text('Pay button does nothing'), findsOneWidget);
     expect(find.text('Being looked at'), findsOneWidget);
     expect(find.text('Map stays blank'), findsNothing, reason: 'resolved ones are on the other tab');
-    await tester.tap(find.text('Resolved'));
+    expect(find.text('Open (1)'), findsOneWidget);
+    // the selected tab is in the app's primary colour, not the default secondaryContainer
+    final tabs = tester.widget<SegmentedButton<bool>>(find.byKey(const Key('loggerai-my-reports-tabs')));
+    expect(tabs.style!.backgroundColor!.resolve({WidgetState.selected}), brand);
+    expect(tabs.style!.backgroundColor!.resolve({WidgetState.selected}), isNot(theme.colorScheme.secondaryContainer));
+    await tester.tap(find.text('Resolved (1)'));
     await tester.pumpAndSettle();
     expect(find.text('Map stays blank'), findsOneWidget);
     expect(find.textContaining('Report #9'), findsOneWidget);
+    final chip = tester.widget<Container>(find.ancestor(of: find.text('Resolved').last, matching: find.byType(Container)).first);
+    expect((chip.decoration as BoxDecoration).color, brand);
     LoggerAI.client!.close();
     await tester.pump(const Duration(seconds: 16));
   });

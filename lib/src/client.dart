@@ -11,7 +11,7 @@ import 'frames.dart';
 import 'platform_stub.dart' if (dart.library.io) 'platform_io.dart' as platform;
 import 'redact.dart';
 
-const sdkVersion = '0.1.5';
+const sdkVersion = '0.1.6';
 const defaultEndpoint = 'https://loggerapp.ehigiator.com/api/v1/ingest/batch';
 const _maxEvents = 1000;
 const _maxErrors = 100;

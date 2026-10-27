@@ -1,3 +1,11 @@
+## 0.1.6
+
+* My reports uses the app's colours: the selected tab and the "Resolved" status in the theme's primary colour,
+  "Being looked at" outlined in it. It no longer relies on secondary/tertiary colours, which many apps leave at
+  Flutter's defaults (a light blue or teal).
+* The tabs show how many reports each has ("Open (2)", "Resolved (1)"), and the empty Resolved tab says which
+  reports show there.
+
 ## 0.1.5
 
 * Personal details are never kept: fields such as `phone`, `phone_number`, `email`, `address`, `postcode`,

@@ -584,19 +584,31 @@ class _MyReportsSheetState extends State<MyReportsSheet> {
     return '${l.day}/${l.month}/${l.year}';
   }
 
+  // The app's own colours: its primary (brand) colour for resolved and being
+  // looked at, neutral for received. Not secondary/tertiary, which many apps
+  // leave at Flutter's defaults (a light blue or teal).
   Widget _status(ThemeData theme, String status) {
     final scheme = theme.colorScheme;
-    final (bg, fg) = switch (status) {
-      'resolved' => (scheme.primaryContainer, scheme.onPrimaryContainer),
-      'investigating' => (scheme.tertiaryContainer, scheme.onTertiaryContainer),
-      _ => (scheme.surfaceContainerHighest, scheme.onSurfaceVariant),
+    final (Color bg, Color fg, Color? border) = switch (status) {
+      'resolved' => (scheme.primary, scheme.onPrimary, null),
+      'investigating' => (Colors.transparent, scheme.primary, scheme.primary),
+      _ => (scheme.surfaceContainerHighest, scheme.onSurfaceVariant, null),
     };
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(999)),
-      child: Text(_label[status] ?? status, style: theme.textTheme.labelMedium?.copyWith(color: fg)),
+      decoration: BoxDecoration(
+          color: bg, borderRadius: BorderRadius.circular(999), border: border == null ? null : Border.all(color: border)),
+      child: Text(_label[status] ?? status, style: theme.textTheme.labelMedium?.copyWith(color: fg, fontWeight: FontWeight.w600)),
     );
   }
+
+  ButtonStyle _tabsStyle(ColorScheme scheme) => ButtonStyle(
+        backgroundColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.selected) ? scheme.primary : null),
+        foregroundColor:
+            WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.selected) ? scheme.onPrimary : scheme.onSurface),
+        iconColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.selected) ? scheme.onPrimary : scheme.onSurface),
+        side: WidgetStatePropertyAll(BorderSide(color: scheme.outlineVariant)),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -608,21 +620,33 @@ class _MyReportsSheetState extends State<MyReportsSheet> {
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           Text(widget.title, style: theme.textTheme.titleLarge),
           const SizedBox(height: 12),
-          SegmentedButton<bool>(
-            key: const Key('loggerai-my-reports-tabs'),
-            segments: const [
-              ButtonSegment(value: false, label: Text('Open'), icon: Icon(Icons.inbox_outlined)),
-              ButtonSegment(value: true, label: Text('Resolved'), icon: Icon(Icons.task_alt)),
-            ],
-            selected: {_resolved},
-            onSelectionChanged: (s) => setState(() => _resolved = s.first),
+          FutureBuilder<List<MyReport>>(
+            future: _load,
+            builder: (context, snap) {
+              final all = snap.data ?? const <MyReport>[];
+              final resolved = all.where((r) => r.resolved).length;
+              String label(String name, int n) => snap.hasData ? '$name ($n)' : name;
+              return SegmentedButton<bool>(
+                key: const Key('loggerai-my-reports-tabs'),
+                style: _tabsStyle(theme.colorScheme),
+                showSelectedIcon: false,
+                segments: [
+                  ButtonSegment(value: false, label: Text(label('Open', all.length - resolved)), icon: const Icon(Icons.inbox_outlined)),
+                  ButtonSegment(value: true, label: Text(label('Resolved', resolved)), icon: const Icon(Icons.task_alt)),
+                ],
+                selected: {_resolved},
+                onSelectionChanged: (s) => setState(() => _resolved = s.first),
+              );
+            },
           ),
           const SizedBox(height: 8),
           Expanded(
             child: FutureBuilder<List<MyReport>>(
               future: _load,
               builder: (context, snap) {
-                if (snap.connectionState != ConnectionState.done) return const Center(child: CircularProgressIndicator());
+                if (snap.connectionState != ConnectionState.done) {
+                  return Center(child: CircularProgressIndicator(color: theme.colorScheme.primary));
+                }
                 if (snap.hasError) {
                   return Center(
                     child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -635,7 +659,10 @@ class _MyReportsSheetState extends State<MyReportsSheet> {
                 final items = (snap.data ?? const <MyReport>[]).where((r) => r.resolved == _resolved).toList();
                 if (items.isEmpty) {
                   return Center(
-                    child: Text(_resolved ? 'Nothing resolved yet.' : 'No open reports. If something goes wrong, tell us from Report a problem.',
+                    child: Text(
+                        _resolved
+                            ? 'Nothing resolved yet. Reports sent from this phone show here once the team resolves them.'
+                            : 'No open reports. If something goes wrong, tell us from Report a problem.',
                         textAlign: TextAlign.center, style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
                   );
                 }
